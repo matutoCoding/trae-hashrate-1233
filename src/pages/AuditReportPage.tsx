@@ -38,7 +38,7 @@ import { useRectificationStore } from '@/store/useRectificationStore';
 import type { DrillState, DepartmentStat, ProjectStat, FolderStat, Rectification, AuditReport } from '@/types';
 import { cn } from '@/lib/utils';
 import { exportExcel, exportPDF } from '@/utils/export';
-import { getScreenshot } from '@/utils/storage';
+import { getScreenshot, clearAllData } from '@/utils/storage';
 import StatusBadge from '@/components/StatusBadge';
 import Modal from '@/components/Modal';
 
@@ -55,6 +55,8 @@ export default function AuditReportPage() {
     computeFullProjectStats,
     computeFullFolderStats,
     getRectificationsForDrill,
+    getOverviewStats,
+    getFilteredByScope,
     initialize,
     updateRectificationStatus,
   } = useRectificationStore();
@@ -67,53 +69,70 @@ export default function AuditReportPage() {
   const [selectedRect, setSelectedRect] = useState<string | null>(null);
 
   useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('reset') === '1') {
+      clearAllData();
+      window.location.href = window.location.pathname;
+      return;
+    }
     initialize();
   }, [initialize]);
 
-  const overviewStats = useMemo(() => {
-    const deptStats = computeFullDepartmentStats();
-    const total = deptStats.reduce((s, d) => s + d.totalIssues, 0);
-    const resolved = deptStats.reduce((s, d) => s + d.resolved, 0);
-    const pending = deptStats.reduce((s, d) => s + d.pending, 0);
-    const processing = deptStats.reduce((s, d) => s + d.processing, 0);
-    const overdue = deptStats.reduce((s, d) => s + d.overdue, 0);
-    const rate = total > 0 ? Math.round((resolved / total) * 100) : 0;
-    return { total, resolved, pending, processing, overdue, rate };
-  }, [rectifications, computeFullDepartmentStats]);
+  const scopeFilter = useMemo(() => {
+    const filter: { period?: string; department?: string; project?: string; folderId?: string } = { period };
+    if (drill.department) filter.department = drill.department;
+    if (drill.project) filter.project = drill.project;
+    if (drill.folderId) filter.folderId = drill.folderId;
+    return filter;
+  }, [period, drill]);
+
+  const currentStats = useMemo(() => {
+    return getOverviewStats(scopeFilter);
+  }, [rectifications, period, drill, getOverviewStats]);
 
   const drillContent = useMemo(() => {
-    if (drill.level === 'overview' || drill.level === 'department') {
-      return computeFullDepartmentStats();
+    const filter = { period };
+
+    if (drill.level === 'overview') {
+      return computeFullDepartmentStats(filter);
     }
-    if (drill.level === 'project') {
-      return computeFullProjectStats(drill.department);
+    if (drill.level === 'department' && drill.department) {
+      return computeFullProjectStats({ ...filter, department: drill.department });
     }
-    if (drill.level === 'folder') {
-      return computeFullFolderStats(drill.department, drill.project);
+    if (drill.level === 'project' && drill.department && drill.project) {
+      return computeFullFolderStats({ ...filter, department: drill.department, project: drill.project });
+    }
+    if (drill.level === 'folder' && drill.folderId) {
+      return computeFullFolderStats({ ...filter, folderId: drill.folderId });
     }
     return [];
-  }, [drill, rectifications, computeFullDepartmentStats, computeFullProjectStats, computeFullFolderStats]);
+  }, [drill, rectifications, period, computeFullDepartmentStats, computeFullProjectStats, computeFullFolderStats]);
 
   const drillRectifications = useMemo(() => {
-    if (drill.level === 'rectifications' && drill.department) {
-      return getRectificationsForDrill(
+    if (drill.level === 'rectifications') {
+      const rects = getRectificationsForDrill(
         'folder',
         drill.department,
         drill.project,
-        drill.folderId
+        drill.folderId,
+        period
       ).sort((a, b) => {
         if (a.isOverdue && !b.isOverdue) return -1;
         if (!a.isOverdue && b.isOverdue) return 1;
         return 0;
       });
+      return rects;
     }
     return [];
-  }, [drill, rectifications, getRectificationsForDrill]);
+  }, [drill, rectifications, period, getRectificationsForDrill]);
+
+  const currentScopeRectifications = useMemo(() => {
+    return getFilteredByScope(scopeFilter);
+  }, [rectifications, scopeFilter, getFilteredByScope]);
 
   const chartData = useMemo(() => {
-    const list = drill.level === 'rectifications'
-      ? []
-      : (drillContent as Array<{ name: string; totalIssues: number; resolved: number; pending: number; processing: number; overdue: number }>).slice(0, 10);
+    if (drill.level === 'rectifications') return [];
+    const list = (drillContent as Array<{ name: string; totalIssues: number; resolved: number; pending: number; processing: number; overdue: number }>).slice(0, 10);
 
     return list.map((item) => ({
       name: item.name,
@@ -124,19 +143,21 @@ export default function AuditReportPage() {
     }));
   }, [drill, drillContent]);
 
-  const currentStats = useMemo(() => {
-    if (drill.level === 'overview') {
-      return overviewStats;
-    }
-    const list = drillContent as Array<{ totalIssues: number; resolved: number; pending: number; processing: number; overdue: number }>;
-    const total = list.reduce((s, d) => s + d.totalIssues, 0);
-    const resolved = list.reduce((s, d) => s + d.resolved, 0);
-    const pending = list.reduce((s, d) => s + d.pending, 0);
-    const processing = list.reduce((s, d) => s + d.processing, 0);
-    const overdue = list.reduce((s, d) => s + d.overdue, 0);
-    const rate = total > 0 ? Math.round((resolved / total) * 100) : 0;
-    return { total, resolved, pending, processing, overdue, rate };
-  }, [drill, drillContent, overviewStats]);
+  const chartTitle = useMemo(() => {
+    if (drill.level === 'overview') return '各部门风险分布';
+    if (drill.level === 'department') return `${drill.department} 各项目风险分布`;
+    if (drill.level === 'project') return `${drill.project} 各文件夹风险分布`;
+    if (drill.level === 'folder') return `${drill.folderName} 风险分布`;
+    return '风险分布';
+  }, [drill]);
+
+  const sectionTitle = useMemo(() => {
+    if (drill.level === 'overview') return '部门统计';
+    if (drill.level === 'department') return `${drill.department} - 项目统计`;
+    if (drill.level === 'project') return `${drill.project} - 文件夹统计`;
+    if (drill.level === 'folder') return `${drill.folderName} - 详情`;
+    return '';
+  }, [drill]);
 
   const breadcrumbs = useMemo(() => {
     const items: { label: string; drill?: DrillState }[] = [{ label: '概览', drill: { level: 'overview' } }];
@@ -154,6 +175,12 @@ export default function AuditReportPage() {
     }
     return items;
   }, [drill]);
+
+  const handlePeriodChange = (p: string) => {
+    setPeriod(p);
+    resetDrill();
+    setShowPeriodDropdown(false);
+  };
 
   const handleDrillToDepartment = (stat: DepartmentStat) => {
     setDrill({ level: 'department', department: stat.name });
@@ -173,37 +200,52 @@ export default function AuditReportPage() {
     });
   };
 
-  const handleDrillToRectifications = () => {
+  const handleDrillToRectifications = (stat: FolderStat) => {
     setDrill({
       level: 'rectifications',
-      department: drill.department,
-      project: drill.project,
-      folderId: drill.folderId,
-      folderName: drill.folderName,
+      department: stat.department,
+      project: stat.project,
+      folderId: stat.folderId,
+      folderName: stat.name,
     });
+  };
+
+  const handleBreadcrumbClick = (drillState?: DrillState) => {
+    if (drillState) {
+      setDrill(drillState);
+    }
   };
 
   const handleExportExcel = async () => {
     setExportingExcel(true);
     try {
-      const deptStats = computeFullDepartmentStats();
+      const deptStats = computeFullDepartmentStats({ period });
+      const projStats = drill.department
+        ? computeFullProjectStats({ period, department: drill.department })
+        : computeFullProjectStats({ period });
+      const foldStats = drill.department && drill.project
+        ? computeFullFolderStats({ period, department: drill.department, project: drill.project })
+        : drill.folderId
+        ? computeFullFolderStats({ period, folderId: drill.folderId })
+        : computeFullFolderStats({ period });
+
       const report: AuditReport = {
         period,
-        totalIssues: overviewStats.total,
-        resolved: overviewStats.resolved,
-        pending: overviewStats.pending,
-        processing: overviewStats.processing,
-        overdue: overviewStats.overdue,
-        completionRate: overviewStats.rate,
+        totalIssues: currentStats.total,
+        resolved: currentStats.resolved,
+        pending: currentStats.pending,
+        processing: currentStats.processing,
+        overdue: currentStats.overdue,
+        completionRate: currentStats.rate,
         departmentStats: deptStats,
-        projectStats: computeFullProjectStats(),
-        folderStats: computeFullFolderStats(),
+        projectStats: projStats,
+        folderStats: foldStats,
       };
       await exportExcel(
         report,
         'department',
         drill,
-        drillRectifications
+        currentScopeRectifications
       );
     } catch (err) {
       console.error(err);
@@ -216,24 +258,33 @@ export default function AuditReportPage() {
   const handleExportPDF = async () => {
     setExportingPDF(true);
     try {
-      const deptStats = computeFullDepartmentStats();
+      const deptStats = computeFullDepartmentStats({ period });
+      const projStats = drill.department
+        ? computeFullProjectStats({ period, department: drill.department })
+        : computeFullProjectStats({ period });
+      const foldStats = drill.department && drill.project
+        ? computeFullFolderStats({ period, department: drill.department, project: drill.project })
+        : drill.folderId
+        ? computeFullFolderStats({ period, folderId: drill.folderId })
+        : computeFullFolderStats({ period });
+
       const report: AuditReport = {
         period,
-        totalIssues: overviewStats.total,
-        resolved: overviewStats.resolved,
-        pending: overviewStats.pending,
-        processing: overviewStats.processing,
-        overdue: overviewStats.overdue,
-        completionRate: overviewStats.rate,
+        totalIssues: currentStats.total,
+        resolved: currentStats.resolved,
+        pending: currentStats.pending,
+        processing: currentStats.processing,
+        overdue: currentStats.overdue,
+        completionRate: currentStats.rate,
         departmentStats: deptStats,
-        projectStats: computeFullProjectStats(),
-        folderStats: computeFullFolderStats(),
+        projectStats: projStats,
+        folderStats: foldStats,
       };
       await exportPDF(
         report,
         'department',
         drill,
-        drillRectifications
+        currentScopeRectifications
       );
     } catch (err) {
       console.error(err);
@@ -243,16 +294,7 @@ export default function AuditReportPage() {
     }
   };
 
-  const handlePreviewScreenshot = (fileName: string) => {
-    const data = getScreenshot(fileName);
-    if (data) {
-      setPreviewScreenshot({ name: fileName, data });
-    } else {
-      alert('截图凭证暂不可用');
-    }
-  };
-
-  const handleQuickProcess = (id: string) => {
+  const handleOpenProcess = (id: string) => {
     setSelectedRect(id);
     setShowProcessModal(true);
   };
@@ -261,170 +303,65 @@ export default function AuditReportPage() {
     updateRectificationStatus(id, 'processing');
   };
 
-  const currentRect = selectedRect ? rectifications.find((r) => r.id === selectedRect) : null;
-
-  const getScopeLabel = () => {
+  const scopeLabel = useMemo(() => {
     if (drill.level === 'overview') return '全公司';
-    if (drill.level === 'department') return `部门：${drill.department}`;
-    if (drill.level === 'project') return `项目：${drill.project}`;
-    if (drill.level === 'folder') return `文件夹：${drill.folderName}`;
-    if (drill.level === 'rectifications') return `整改单列表：${drill.folderName}`;
-    return '';
-  };
-
-  const StatCard = ({ stat, onClick, icon: Icon, delayDrill }: {
-    stat: DepartmentStat | ProjectStat | FolderStat;
-    onClick?: () => void;
-    icon?: typeof Building2;
-    delayDrill?: () => void;
-  }) => {
-    const rate = stat.totalIssues > 0 ? Math.round((stat.resolved / stat.totalIssues) * 100) : 0;
-    const isDepartment = 'department' in stat === false || drill.level === 'department';
-    const isProject = 'department' in stat && 'project' in stat === false;
-    const isFolder = 'department' in stat && 'project' in stat;
-
-    return (
-      <div
-        onClick={onClick}
-        className={cn(
-          'bg-white rounded-xl border p-5 hover:shadow-md transition-all cursor-pointer',
-          stat.overdue > 0 ? 'border-red-200 hover:border-red-300' : 'border-gray-200 hover:border-blue-200'
-        )}
-      >
-        <div className="flex items-start justify-between">
-          <div className="flex-1">
-            <div className="flex items-center gap-2 mb-2">
-              {Icon && <Icon className={cn('w-4 h-4', isDepartment ? 'text-blue-600' : isProject ? 'text-purple-600' : 'text-emerald-600')} />}
-              <h3 className="font-semibold text-gray-900 truncate max-w-[200px]">{stat.name}</h3>
-              {stat.overdue > 0 && (
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-red-100 text-red-600 rounded text-[10px] font-medium">
-                  <AlertCircle className="w-3 h-3" />
-                  {stat.overdue} 逾期
-                </span>
-              )}
-            </div>
-            <div className="flex items-baseline gap-1">
-              <span className="text-2xl font-bold text-gray-900">{stat.totalIssues}</span>
-              <span className="text-xs text-gray-500">条任务</span>
-            </div>
-          </div>
-          <div className="flex flex-col items-end gap-1">
-            <span className={cn(
-              'text-lg font-bold',
-              rate >= 80 ? 'text-green-600' : rate >= 50 ? 'text-amber-600' : 'text-red-600'
-            )}>
-              {rate}%
-            </span>
-            {onClick && (
-              <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-gray-600" />
-            )}
-          </div>
-        </div>
-        <div className="mt-4 flex items-center justify-between text-xs">
-          <div className="flex items-center gap-3">
-            <span className="text-green-600 flex items-center gap-1">
-              <CheckCircle2 className="w-3 h-3" />
-              {stat.resolved}
-            </span>
-            <span className="text-blue-600 flex items-center gap-1">
-              <PlayCircle className="w-3 h-3" />
-              {stat.processing}
-            </span>
-            <span className="text-amber-600 flex items-center gap-1">
-              <Clock className="w-3 h-3" />
-              {stat.pending}
-            </span>
-            {stat.overdue > 0 && (
-              <span className="text-red-600 flex items-center gap-1">
-                <XCircle className="w-3 h-3" />
-                {stat.overdue}
-              </span>
-            )}
-          </div>
-        </div>
-        <div className="mt-2 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-          <div
-            className={cn(
-              'h-full rounded-full transition-all',
-              rate >= 80 ? 'bg-gradient-to-r from-green-400 to-green-600' :
-              rate >= 50 ? 'bg-gradient-to-r from-amber-400 to-orange-500' :
-              'bg-gradient-to-r from-red-400 to-rose-500'
-            )}
-            style={{ width: `${rate}%` }}
-          />
-        </div>
-        {delayDrill && (
-          <button
-            onClick={(e) => { e.stopPropagation(); delayDrill(); }}
-            className="mt-3 w-full py-1.5 text-xs text-blue-600 bg-blue-50 rounded-md hover:bg-blue-100 transition-colors"
-          >
-            查看整改单列表 →
-          </button>
-        )}
-      </div>
-    );
-  };
+    if (drill.level === 'department') return drill.department || '全公司';
+    if (drill.level === 'project') return `${drill.department} / ${drill.project}`;
+    if (drill.level === 'folder' || drill.level === 'rectifications') return `${drill.department} / ${drill.project} / ${drill.folderName}`;
+    return '全公司';
+  }, [drill]);
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold text-gray-900">审计报告</h1>
-            <span className="text-sm text-gray-400">· {getScopeLabel()}</span>
-          </div>
-          <div className="flex items-center gap-2 mt-1">
+          <h1 className="text-2xl font-bold text-gray-900">审计报告</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            统计范围：<span className="font-medium text-gray-700">{scopeLabel}</span>
+            {' · '}
+            周期：<span className="font-medium text-gray-700">{period}</span>
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <nav className="flex items-center gap-1 text-sm">
             {breadcrumbs.map((item, idx) => (
-              <div key={idx} className="flex items-center gap-2">
+              <div key={idx} className="flex items-center">
+                {idx > 0 && <ChevronRight className="w-4 h-4 text-gray-400 mx-1" />}
                 {item.drill ? (
                   <button
-                    onClick={() => setDrill(item.drill!)}
+                    onClick={() => handleBreadcrumbClick(item.drill)}
                     className={cn(
-                      'text-sm hover:underline',
-                      idx === breadcrumbs.length - 1 ? 'text-blue-600 font-medium' : 'text-gray-500'
+                      'text-blue-600 hover:text-blue-700 hover:underline transition-colors',
+                      idx === breadcrumbs.length - 1 && 'font-medium'
                     )}
                   >
-                    {idx === 0 && <Home className="w-3.5 h-3.5 inline mr-1" />}
                     {item.label}
                   </button>
                 ) : (
-                  <span className="text-sm text-blue-600 font-medium">{item.label}</span>
+                  <span className="text-gray-600 font-medium">{item.label}</span>
                 )}
-                {idx < breadcrumbs.length - 1 && <ChevronRight className="w-4 h-4 text-gray-300" />}
               </div>
             ))}
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
-          {drill.level !== 'overview' && (
-            <button
-              onClick={resetDrill}
-              className="flex items-center gap-2 px-4 py-2 text-sm text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              返回概览
-            </button>
-          )}
+          </nav>
+
           <div className="relative">
             <button
               onClick={() => setShowPeriodDropdown(!showPeriodDropdown)}
-              className="flex items-center gap-2 px-4 py-2 text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded-lg hover:bg-gray-100 transition-colors"
+              className="flex items-center gap-2 px-4 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
             >
-              <Calendar className="w-4 h-4" />
-              {period}
+              <Calendar className="w-4 h-4 text-gray-400" />
+              <span className="text-sm font-medium text-gray-700">{period}</span>
+              <ChevronRight className={cn('w-4 h-4 text-gray-400 transition-transform', showPeriodDropdown && 'rotate-90')} />
             </button>
             {showPeriodDropdown && (
-              <div className="absolute top-full right-0 mt-1 w-32 bg-white border border-gray-200 rounded-lg shadow-lg z-10 py-1">
+              <div className="absolute right-0 top-full mt-2 w-40 bg-white border border-gray-200 rounded-lg shadow-lg z-50 py-1">
                 {periods.map((p) => (
                   <button
                     key={p}
-                    onClick={() => {
-                      setPeriod(p);
-                      setShowPeriodDropdown(false);
-                    }}
+                    onClick={() => handlePeriodChange(p)}
                     className={cn(
                       'w-full px-4 py-2 text-left text-sm hover:bg-gray-50 transition-colors',
-                      period === p && 'text-blue-600 bg-blue-50'
+                      p === period ? 'text-blue-600 bg-blue-50 font-medium' : 'text-gray-700'
                     )}
                   >
                     {p}
@@ -433,52 +370,43 @@ export default function AuditReportPage() {
               </div>
             )}
           </div>
+
           <button
             onClick={handleExportPDF}
             disabled={exportingPDF}
-            className={cn(
-              'px-4 py-2 text-sm font-medium border rounded-lg transition-colors flex items-center gap-2 shadow-sm',
-              exportingPDF
-                ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
-                : 'text-gray-700 bg-white border-gray-300 hover:bg-gray-50'
-            )}
+            className="flex items-center gap-2 px-4 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
-            {exportingPDF ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileBarChart className="w-4 h-4" />}
-            {exportingPDF ? '生成中...' : '生成PDF'}
+            {exportingPDF ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+            生成PDF
           </button>
           <button
             onClick={handleExportExcel}
             disabled={exportingExcel}
-            className={cn(
-              'px-4 py-2 text-sm font-medium rounded-lg transition-colors flex items-center gap-2 shadow-sm',
-              exportingExcel
-                ? 'bg-blue-400 text-white cursor-not-allowed'
-                : 'bg-blue-600 text-white hover:bg-blue-700'
-            )}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {exportingExcel ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-            {exportingExcel ? '导出中...' : '导出Excel'}
+            导出Excel
           </button>
         </div>
       </div>
 
       <div className="grid grid-cols-5 gap-4">
-        <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl p-5 text-white">
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-blue-100 text-sm">问题总数</p>
-              <p className="mt-2 text-3xl font-bold">{currentStats.total}</p>
+              <p className="text-sm text-gray-500">问题总数</p>
+              <p className="mt-2 text-3xl font-bold text-gray-900">{currentStats.total}</p>
             </div>
-            <div className="p-3 bg-white/20 rounded-xl">
-              <AlertTriangle className="w-6 h-6" />
+            <div className="p-3 bg-blue-50 rounded-xl">
+              <FileBarChart className="w-6 h-6 text-blue-600" />
             </div>
           </div>
-          <div className="mt-3 flex items-center gap-1 text-sm text-blue-200">
-            <TrendingUp className="w-4 h-4" />
-            {getScopeLabel()}
-          </div>
+          {currentStats.total > 0 && (
+            <p className="mt-3 text-xs text-gray-500">
+              完成率 <span className="font-medium text-blue-600">{currentStats.rate}%</span>
+            </p>
+          )}
         </div>
-
         <div className="bg-white rounded-xl border border-gray-200 p-5">
           <div className="flex items-center justify-between">
             <div>
@@ -489,11 +417,12 @@ export default function AuditReportPage() {
               <CheckCircle2 className="w-6 h-6 text-green-600" />
             </div>
           </div>
-          <div className="mt-3 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-            <div className="h-full bg-green-500 rounded-full transition-all" style={{ width: `${currentStats.rate}%` }} />
-          </div>
+          {currentStats.total > 0 && (
+            <p className="mt-3 text-xs text-gray-500">
+              占比 <span className="font-medium text-green-600">{Math.round((currentStats.resolved / currentStats.total) * 100)}%</span>
+            </p>
+          )}
         </div>
-
         <div className="bg-white rounded-xl border border-gray-200 p-5">
           <div className="flex items-center justify-between">
             <div>
@@ -504,11 +433,12 @@ export default function AuditReportPage() {
               <Loader2 className="w-6 h-6 text-blue-600 animate-spin" />
             </div>
           </div>
-          <p className="mt-3 text-xs text-gray-400">
-            占比 {currentStats.total > 0 ? Math.round((currentStats.processing / currentStats.total) * 100) : 0}%
-          </p>
+          {currentStats.total > 0 && (
+            <p className="mt-3 text-xs text-gray-500">
+              占比 <span className="font-medium text-blue-600">{Math.round((currentStats.processing / currentStats.total) * 100)}%</span>
+            </p>
+          )}
         </div>
-
         <div className="bg-white rounded-xl border border-gray-200 p-5">
           <div className="flex items-center justify-between">
             <div>
@@ -519,202 +449,247 @@ export default function AuditReportPage() {
               <Clock className="w-6 h-6 text-amber-600" />
             </div>
           </div>
-          <p className="mt-3 text-xs text-gray-400">
-            需在本月底前完成
-          </p>
+          <p className="mt-3 text-xs text-amber-600">需在本月底前完成</p>
         </div>
-
         <div className={cn(
           'rounded-xl border p-5',
-          currentStats.overdue > 0
-            ? 'bg-gradient-to-br from-red-50 to-orange-50 border-red-200'
-            : 'bg-white border-gray-200'
+          currentStats.overdue > 0 ? 'bg-gradient-to-br from-red-50 to-orange-50 border-red-200' : 'bg-white border-gray-200'
         )}>
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm text-gray-500">逾期未处理</p>
-              <p className={cn(
-                'mt-2 text-3xl font-bold',
-                currentStats.overdue > 0 ? 'text-red-600' : 'text-gray-400'
-              )}>
+              <p className={cn('mt-2 text-3xl font-bold', currentStats.overdue > 0 ? 'text-red-600' : 'text-gray-400')}>
                 {currentStats.overdue}
               </p>
             </div>
-            <div className={cn(
-              'p-3 rounded-xl',
-              currentStats.overdue > 0 ? 'bg-red-100' : 'bg-gray-50'
-            )}>
-              <AlertCircle className={cn('w-6 h-6', currentStats.overdue > 0 ? 'text-red-600' : 'text-gray-400')} />
+            <div className={cn('p-3 rounded-xl', currentStats.overdue > 0 ? 'bg-red-100' : 'bg-gray-50')}>
+              <AlertTriangle className={cn('w-6 h-6', currentStats.overdue > 0 ? 'text-red-600' : 'text-gray-400')} />
             </div>
           </div>
           <p className={cn(
             'mt-3 text-xs',
-            currentStats.overdue > 0 ? 'text-red-600' : 'text-gray-400'
+            currentStats.overdue > 0 ? 'text-red-600 font-medium' : 'text-gray-400'
           )}>
             {currentStats.overdue > 0 ? '请重点跟进催办' : '暂无逾期任务'}
           </p>
         </div>
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-        <h2 className="text-base font-semibold text-gray-900 mb-4">风险分布</h2>
-        {chartData.length > 0 ? (
-          <div className="h-80">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
-                <XAxis dataKey="name" tick={{ fontSize: 12 }} stroke="#9CA3AF" />
-                <YAxis tick={{ fontSize: 12 }} stroke="#9CA3AF" />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: 'white',
-                    border: '1px solid #E5E7EB',
-                    borderRadius: '8px',
-                    boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)',
-                  }}
-                />
-                <Legend />
-                <Bar dataKey="已处理" fill="#10B981" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="处理中" fill="#3B82F6" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="待处理" fill="#F59E0B" radius={[4, 4, 0, 0]} />
-                <Bar dataKey="逾期" fill="#EF4444" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        ) : (
-          <div className="h-80 flex items-center justify-center">
-            <p className="text-gray-400">当前层级为整改单明细，无柱状图数据</p>
-          </div>
-        )}
-      </div>
+      {drill.level !== 'rectifications' && (
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4">{chartTitle}</h2>
+          {chartData.length > 0 ? (
+            <div className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                  <XAxis dataKey="name" fontSize={12} tickLine={false} axisLine={false} />
+                  <YAxis fontSize={12} tickLine={false} axisLine={false} />
+                  <Tooltip
+                    contentStyle={{ borderRadius: '8px', border: '1px solid #E5E7EB', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)' }}
+                  />
+                  <Legend />
+                  <Bar dataKey="已处理" fill="#10B981" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="处理中" fill="#3B82F6" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="待处理" fill="#F59E0B" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="逾期" fill="#EF4444" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <div className="h-72 flex items-center justify-center">
+              <p className="text-gray-400">当前周期和范围内暂无数据</p>
+            </div>
+          )}
+        </div>
+      )}
 
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
-        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <ListChecks className="w-5 h-5 text-blue-600" />
-            <h2 className="text-base font-semibold text-gray-900">
-              {drill.level === 'overview' && '部门统计'}
-              {drill.level === 'department' && `「${drill.department}」下属项目`}
-              {drill.level === 'project' && `「${drill.project}」下属文件夹`}
-              {drill.level === 'folder' && `「${drill.folderName}」文件夹信息`}
-              {drill.level === 'rectifications' && `整改单列表（${drillRectifications.length} 条）`}
-            </h2>
+      {drill.level !== 'rectifications' && (
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
+          <div className="px-5 py-4 border-b border-gray-100">
+            <h2 className="text-lg font-semibold text-gray-900">{sectionTitle}</h2>
+          </div>
+          {drillContent.length === 0 ? (
+            <div className="py-16 text-center">
+              <FileBarChart className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+              <p className="text-gray-500">当前周期和范围内暂无数据</p>
+            </div>
+          ) : (
+            <div className="p-5">
+              {drill.level === 'folder' ? (
+                <FolderDetailCard
+                  stat={drillContent[0] as FolderStat}
+                  onViewRectifications={() => handleDrillToRectifications(drillContent[0] as FolderStat)}
+                />
+              ) : (
+                <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                  {(drillContent as Array<DepartmentStat | ProjectStat | FolderStat>).map((stat, idx) => (
+                    <StatCard
+                      key={stat.name}
+                      stat={stat}
+                      color={COLORS[idx % COLORS.length]}
+                      onClick={() => {
+                        if (drill.level === 'overview') {
+                          handleDrillToDepartment(stat as DepartmentStat);
+                        } else if (drill.level === 'department') {
+                          handleDrillToProject(stat as ProjectStat);
+                        } else if (drill.level === 'project') {
+                          handleDrillToFolder(stat as FolderStat);
+                        }
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="px-5 py-4 border-t border-gray-100">
+            <p className="text-xs text-gray-400 flex items-center gap-1">
+              <ListChecks className="w-3.5 h-3.5" />
+              {drill.level === 'folder'
+                ? '点击上方按钮查看该文件夹的整改单明细'
+                : drill.level === 'project'
+                ? '点击卡片可下钻查看该文件夹详情'
+                : drill.level === 'department'
+                ? '点击卡片可下钻查看该项目下的文件夹'
+                : '点击卡片可下钻查看该部门下的项目'}
+            </p>
           </div>
         </div>
+      )}
 
-        {drill.level !== 'rectifications' && drillContent.length > 0 && (
-          <div className="p-5">
-            <div className="grid grid-cols-3 gap-4">
-              {drill.level === 'overview' &&
-                (drillContent as DepartmentStat[]).map((stat) => (
-                  <StatCard
-                    key={stat.name}
-                    stat={stat}
-                    icon={Building2}
-                    onClick={() => handleDrillToDepartment(stat)}
-                  />
-                ))}
-              {drill.level === 'department' &&
-                (drillContent as ProjectStat[]).map((stat) => (
-                  <StatCard
-                    key={stat.name}
-                    stat={stat}
-                    icon={FileText}
-                    onClick={() => handleDrillToProject(stat)}
-                  />
-                ))}
-              {drill.level === 'project' &&
-                (drillContent as FolderStat[]).map((stat) => (
-                  <StatCard
-                    key={stat.folderId || stat.name}
-                    stat={stat}
-                    icon={FolderOpen}
-                    onClick={() => handleDrillToFolder(stat)}
-                  />
-                ))}
-              {drill.level === 'folder' &&
-                (drillContent as FolderStat[]).map((stat) => (
-                  <StatCard
-                    key={stat.folderId || stat.name}
-                    stat={stat}
-                    icon={FolderOpen}
-                    delayDrill={handleDrillToRectifications}
-                  />
-                ))}
+      {drill.level === 'rectifications' && (
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
+          <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+            <h2 className="text-lg font-semibold text-gray-900">
+              {drill.folderName} - 整改单列表
+            </h2>
+            <span className="text-sm text-gray-500">
+              共 <span className="font-medium text-gray-900">{drillRectifications.length}</span> 条记录
+            </span>
+          </div>
+          {drillRectifications.length === 0 ? (
+            <div className="py-16 text-center">
+              <ClipboardList className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+              <p className="text-gray-500">该文件夹暂无整改记录</p>
             </div>
-            {drill.level !== 'folder' && drillContent.length > 0 && (
-              <div className="mt-4 p-4 bg-blue-50 border border-blue-100 rounded-xl">
-                <p className="text-sm text-blue-700">
-                  💡 点击卡片可下钻查看下一级明细
-                </p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {drill.level !== 'rectifications' && drillContent.length === 0 && (
-          <div className="p-16 text-center">
-            <FileText className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-            <p className="text-gray-500">当前层级暂无数据</p>
-          </div>
-        )}
-
-        {drill.level === 'rectifications' && (
-          <div className="divide-y divide-gray-100">
-            {drillRectifications.length === 0 ? (
-              <div className="p-16 text-center">
-                <ClipboardList className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-                <p className="text-gray-500">暂无整改单数据</p>
-              </div>
-            ) : (
-              drillRectifications.map((rect) => (
-                <RectRow
-                  key={rect.id}
-                  rect={rect}
-                  onPreviewScreenshot={handlePreviewScreenshot}
-                  onProcess={handleQuickProcess}
-                  onStartProcessing={handleStartProcessing}
-                  onNavigateToFolder={() => navigate(`/folder/${rect.folderId}`)}
-                />
-              ))
-            )}
-          </div>
-        )}
-      </div>
+          ) : (
+            <div className="divide-y divide-gray-100">
+              {drillRectifications.map((todo) => (
+                <div
+                  key={todo.id}
+                  className={cn(
+                    'p-5 hover:bg-gray-50 transition-colors',
+                    todo.isOverdue && 'bg-red-50/30'
+                  )}
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <h3 className="font-medium text-gray-900">{todo.folderName}</h3>
+                        <StatusBadge status={todo.status} />
+                        {todo.isOverdue && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-100 text-red-600 text-xs font-medium rounded">
+                            <AlertCircle className="w-3 h-3" />
+                            已逾期
+                          </span>
+                        )}
+                        {todo.screenshot && todo.status === 'completed' && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const data = getScreenshot(todo.screenshot!);
+                              if (data) setPreviewScreenshot({ name: todo.screenshot!, data });
+                              else alert('截图文件暂不可用');
+                            }}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-50 text-blue-600 rounded hover:bg-blue-100 transition-colors"
+                          >
+                            <FileImage className="w-3 h-3" />
+                            查看凭证
+                          </button>
+                        )}
+                      </div>
+                      <p className="mt-2 text-sm text-gray-600">{todo.opinion}</p>
+                      {todo.result && (
+                        <p className="mt-2 text-sm text-green-700 bg-green-50 rounded-lg p-3">
+                          <span className="font-medium">处理结果：</span>{todo.result}
+                        </p>
+                      )}
+                      <div className="flex items-center gap-4 text-xs text-gray-400 flex-wrap mt-3">
+                        <span className="flex items-center gap-1">
+                          <User className="w-3.5 h-3.5" />
+                          审计员：{todo.auditorName}
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <User className="w-3.5 h-3.5" />
+                          负责人：{todo.ownerName}
+                        </span>
+                        <span>涉及 {todo.memberIds.length} 名成员：{todo.memberNames.join('、')}</span>
+                        <span>发起：{todo.createdAt}</span>
+                        {todo.completedAt && <span>完成：{todo.completedAt}</span>}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 ml-4 flex-shrink-0">
+                      {todo.status === 'pending' && (
+                        <>
+                          <button
+                            onClick={() => handleStartProcessing(todo.id)}
+                            className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors flex items-center gap-1"
+                          >
+                            <PlayCircle className="w-3.5 h-3.5" />
+                            开始处理
+                          </button>
+                          <button
+                            onClick={() => navigate('/todos')}
+                            className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+                          >
+                            前往处理
+                          </button>
+                        </>
+                      )}
+                      {todo.status === 'processing' && (
+                        <button
+                          onClick={() => handleOpenProcess(todo.id)}
+                          className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+                        >
+                          提交结果
+                        </button>
+                      )}
+                      {todo.status === 'completed' && (
+                        <button
+                          onClick={() => navigate(`/folder/${todo.folderId}`)}
+                          className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                        >
+                          查看详情
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <Modal
         isOpen={showProcessModal}
         onClose={() => setShowProcessModal(false)}
-        title="处理整改"
+        title="整改处理"
         size="lg"
       >
-        {currentRect && (
-          <div className="space-y-4">
-            <div className="p-4 bg-blue-50 border border-blue-100 rounded-xl">
-              <p className="text-sm font-medium text-blue-900 mb-1">
-                {currentRect.folderName} · 涉及 {currentRect.memberIds.length} 人
-              </p>
-              <p className="text-sm text-blue-700">
-                <span className="font-medium">整改要求：</span>{currentRect.opinion}
-              </p>
-              <p className="text-xs text-blue-600 mt-2">
-                到期日期：{currentRect.dueDate} {currentRect.isOverdue && <span className="text-red-600 font-medium ml-1">（已逾期）</span>}
-              </p>
-            </div>
-            <p className="text-sm text-gray-500">
-              请在「待办中心」完成处理，点击下方按钮跳转：
-            </p>
-            <button
-              onClick={() => {
-                setShowProcessModal(false);
-                navigate('/todos');
-              }}
-              className="w-full py-2.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
-            >
-              前往待办中心处理
-            </button>
-          </div>
-        )}
+        <div className="text-center py-8">
+          <p className="text-gray-600 mb-4">请前往待办中心处理该整改任务</p>
+          <button
+            onClick={() => {
+              setShowProcessModal(false);
+              navigate('/todos');
+            }}
+            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            前往待办中心
+          </button>
+        </div>
       </Modal>
 
       <Modal
@@ -724,15 +699,8 @@ export default function AuditReportPage() {
         size="lg"
       >
         {previewScreenshot && (
-          <div className="space-y-3">
-            <p className="text-xs text-gray-500 break-all">文件名：{previewScreenshot.name}</p>
-            <div className="flex items-center justify-center bg-gray-50 rounded-lg p-4 border border-gray-100">
-              <img
-                src={previewScreenshot.data}
-                alt="凭证"
-                className="max-h-[60vh] max-w-full rounded-md shadow-md"
-              />
-            </div>
+          <div className="flex items-center justify-center bg-gray-50 rounded-lg p-4">
+            <img src={previewScreenshot.data} alt={previewScreenshot.name} className="max-h-[60vh] max-w-full rounded-md shadow-md" />
           </div>
         )}
       </Modal>
@@ -740,102 +708,152 @@ export default function AuditReportPage() {
   );
 }
 
-function RectRow({
-  rect,
-  onPreviewScreenshot,
-  onProcess,
-  onStartProcessing,
-  onNavigateToFolder,
+function StatCard({
+  stat,
+  color,
+  onClick,
 }: {
-  rect: Rectification;
-  onPreviewScreenshot: (fileName: string) => void;
-  onProcess: (id: string) => void;
-  onStartProcessing: (id: string) => void;
-  onNavigateToFolder: () => void;
+  stat: DepartmentStat | ProjectStat | FolderStat;
+  color: string;
+  onClick: () => void;
 }) {
+  const completionRate = stat.totalIssues > 0 ? Math.round((stat.resolved / stat.totalIssues) * 100) : 0;
+  const isOverdue = stat.overdue > 0;
+
   return (
     <div
+      onClick={onClick}
       className={cn(
-        'p-5 hover:bg-gray-50 transition-colors group cursor-pointer',
-        rect.isOverdue && 'bg-red-50/50'
+        'border rounded-xl p-4 cursor-pointer hover:shadow-md transition-all group',
+        isOverdue ? 'border-red-200 bg-red-50/30' : 'border-gray-200 bg-white'
       )}
-      onClick={onNavigateToFolder}
     >
-      <div className="flex items-start justify-between">
-        <div className="flex-1">
-          <div className="flex items-center gap-3 mb-2">
-            <h3 className="font-medium text-gray-900 group-hover:text-blue-600 transition-colors">
-              {rect.folderName}
-            </h3>
-            <StatusBadge status={rect.status} />
-            {rect.isOverdue && (
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-100 text-red-600 text-xs font-medium rounded">
-                <AlertCircle className="w-3 h-3" />
-                已逾期
-              </span>
-            )}
-            {rect.screenshot && rect.status === 'completed' && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onPreviewScreenshot(rect.screenshot!);
-                }}
-                className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-green-50 text-green-600 rounded hover:bg-green-100 transition-colors border border-green-100"
-              >
-                <FileImage className="w-3 h-3" />
-                查看凭证
-              </button>
-            )}
+      <div className="flex items-start justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <div
+            className="w-10 h-10 rounded-lg flex items-center justify-center"
+            style={{ backgroundColor: `${color}15` }}
+          >
+            <Building2 className="w-5 h-5" style={{ color }} />
           </div>
-          <p className="text-sm text-gray-600 mb-2 line-clamp-2">{rect.opinion}</p>
-          {rect.result && (
-            <p className="text-sm text-green-700 bg-green-50 rounded-lg p-3 border border-green-100">
-              <span className="font-medium">处理结果：</span>{rect.result}
-            </p>
-          )}
-          <div className="mt-3 flex items-center gap-4 text-xs text-gray-400 flex-wrap">
-            <span className="flex items-center gap-1">
-              <User className="w-3.5 h-3.5" />
-              审计员：{rect.auditorName}
-            </span>
-            <span className="flex items-center gap-1">
-              <User className="w-3.5 h-3.5" />
-              负责人：{rect.ownerName}
-            </span>
-            <span>成员：{rect.memberNames.join('、')}</span>
-            <span>发起：{rect.createdAt}</span>
-            <span className={rect.isOverdue ? 'text-red-500' : ''}>
-              到期：{rect.dueDate}
-            </span>
-            {rect.completedAt && <span className="text-green-600">完成：{rect.completedAt}</span>}
+          <div>
+            <h3 className="font-semibold text-gray-900 group-hover:text-blue-600 transition-colors">
+              {stat.name}
+            </h3>
+            <p className="text-xs text-gray-400">共 {stat.totalIssues} 项</p>
           </div>
         </div>
-        <div className="flex items-center gap-2 ml-4 flex-shrink-0">
-          {rect.status === 'pending' && (
-            <>
-              <button
-                onClick={(e) => { e.stopPropagation(); onStartProcessing(rect.id); }}
-                className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors"
-              >
-                开始处理
-              </button>
-              <button
-                onClick={(e) => { e.stopPropagation(); onProcess(rect.id); }}
-                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
-              >
-                处理
-              </button>
-            </>
-          )}
-          {rect.status === 'processing' && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onProcess(rect.id); }}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
-            >
-              提交结果
-            </button>
-          )}
-          <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-gray-600 transition-colors" />
+        {isOverdue && (
+          <span className="px-1.5 py-0.5 bg-red-100 text-red-600 text-xs font-medium rounded">
+            逾期
+          </span>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
+          <div
+            className="h-full rounded-full transition-all"
+            style={{
+              width: `${completionRate}%`,
+              backgroundColor: completionRate >= 80 ? '#10B981' : completionRate >= 50 ? '#F59E0B' : '#EF4444',
+            }}
+          />
+        </div>
+
+        <div className="grid grid-cols-4 gap-2 text-center">
+          <div>
+            <p className="text-lg font-bold text-green-600">{stat.resolved}</p>
+            <p className="text-xs text-gray-400">已处理</p>
+          </div>
+          <div>
+            <p className="text-lg font-bold text-blue-600">{stat.processing}</p>
+            <p className="text-xs text-gray-400">处理中</p>
+          </div>
+          <div>
+            <p className="text-lg font-bold text-amber-600">{stat.pending}</p>
+            <p className="text-xs text-gray-400">待处理</p>
+          </div>
+          <div>
+            <p className={cn('text-lg font-bold', stat.overdue > 0 ? 'text-red-600' : 'text-gray-400')}>
+              {stat.overdue}
+            </p>
+            <p className="text-xs text-gray-400">逾期</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-3 pt-3 border-t border-gray-100 flex items-center justify-between">
+        <span className="text-xs text-gray-500">
+          完成率 <span className="font-medium text-gray-700">{completionRate}%</span>
+        </span>
+        <ChevronRight className="w-4 h-4 text-gray-400 group-hover:text-blue-500 transition-colors" />
+      </div>
+    </div>
+  );
+}
+
+function FolderDetailCard({
+  stat,
+  onViewRectifications,
+}: {
+  stat: FolderStat;
+  onViewRectifications: () => void;
+}) {
+  const completionRate = stat.totalIssues > 0 ? Math.round((stat.resolved / stat.totalIssues) * 100) : 0;
+
+  return (
+    <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl p-6 border border-blue-100">
+      <div className="flex items-start justify-between mb-6">
+        <div className="flex items-center gap-3">
+          <div className="w-14 h-14 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl flex items-center justify-center">
+            <FolderOpen className="w-7 h-7 text-white" />
+          </div>
+          <div>
+            <h3 className="text-xl font-bold text-gray-900">{stat.name}</h3>
+            <p className="text-sm text-gray-500 mt-0.5">
+              {stat.department} · {stat.project}
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={onViewRectifications}
+          className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+        >
+          <ListChecks className="w-4 h-4" />
+          查看整改单列表 ({stat.totalIssues})
+        </button>
+      </div>
+
+      <div className="grid grid-cols-4 gap-4">
+        <div className="bg-white rounded-xl p-4 text-center border border-blue-100">
+          <p className="text-3xl font-bold text-blue-600">{stat.totalIssues}</p>
+          <p className="text-sm text-gray-500 mt-1">问题总数</p>
+        </div>
+        <div className="bg-white rounded-xl p-4 text-center border border-green-100">
+          <p className="text-3xl font-bold text-green-600">{stat.resolved}</p>
+          <p className="text-sm text-gray-500 mt-1">已处理</p>
+        </div>
+        <div className="bg-white rounded-xl p-4 text-center border border-amber-100">
+          <p className="text-3xl font-bold text-amber-600">{stat.pending + stat.processing}</p>
+          <p className="text-sm text-gray-500 mt-1">进行中</p>
+        </div>
+        <div className="bg-white rounded-xl p-4 text-center border border-gray-100">
+          <p className="text-3xl font-bold text-gray-900">{completionRate}%</p>
+          <p className="text-sm text-gray-500 mt-1">完成率</p>
+        </div>
+      </div>
+
+      <div className="mt-6">
+        <div className="flex items-center justify-between text-sm mb-2">
+          <span className="text-gray-600">整改进度</span>
+          <span className="font-medium text-gray-900">{completionRate}%</span>
+        </div>
+        <div className="h-3 bg-white rounded-full overflow-hidden border border-blue-100">
+          <div
+            className="h-full rounded-full transition-all bg-gradient-to-r from-blue-500 to-indigo-600"
+            style={{ width: `${completionRate}%` }}
+          />
         </div>
       </div>
     </div>

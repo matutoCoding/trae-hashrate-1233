@@ -50,6 +50,84 @@ function computeStatsFromRectifications(rects: Rectification[]) {
   return { total, resolved, pending, processing, overdue, ids };
 }
 
+function parsePeriod(periodStr: string): { start: Date; end: Date } | null {
+  try {
+    if (periodStr.includes('Q')) {
+      const match = periodStr.match(/(\d+)年Q(\d)/);
+      if (!match) return null;
+      const year = parseInt(match[1], 10);
+      const quarter = parseInt(match[2], 10);
+      const startMonth = (quarter - 1) * 3;
+      const endMonth = startMonth + 3;
+      return {
+        start: new Date(year, startMonth, 1),
+        end: new Date(year, endMonth, 0, 23, 59, 59, 999),
+      };
+    } else {
+      const match = periodStr.match(/(\d+)年(\d+)月/);
+      if (!match) return null;
+      const year = parseInt(match[1], 10);
+      const month = parseInt(match[2], 10) - 1;
+      const lastDay = new Date(year, month + 1, 0).getDate();
+      return {
+        start: new Date(year, month, 1),
+        end: new Date(year, month, lastDay, 23, 59, 59, 999),
+      };
+    }
+  } catch {
+    return null;
+  }
+}
+
+function parseCreatedAt(createdAtStr: string): Date | null {
+  try {
+    const parts = createdAtStr.split(/[\/\s年日月]/g).filter(Boolean);
+    if (parts.length < 3) return null;
+    const year = parseInt(parts[0], 10);
+    const month = parseInt(parts[1], 10) - 1;
+    const day = parseInt(parts[2], 10);
+    return new Date(year, month, day);
+  } catch {
+    return null;
+  }
+}
+
+function isRectInPeriod(rect: Rectification, period: string): boolean {
+  const range = parsePeriod(period);
+  if (!range) return true;
+  const created = parseCreatedAt(rect.createdAt);
+  if (!created) return true;
+  return created >= range.start && created <= range.end;
+}
+
+interface ScopeFilter {
+  period?: string;
+  department?: string;
+  project?: string;
+  folderId?: string;
+}
+
+function filterByScope(rects: Rectification[], filter: ScopeFilter): Rectification[] {
+  let result = [...rects];
+
+  if (filter.period) {
+    result = result.filter((r) => isRectInPeriod(r, filter.period!));
+  }
+  if (filter.department) {
+    const folderIds = folders.filter((f) => f.department === filter.department).map((f) => f.id);
+    result = result.filter((r) => folderIds.includes(r.folderId));
+  }
+  if (filter.project) {
+    const folderIds = folders.filter((f) => f.project === filter.project).map((f) => f.id);
+    result = result.filter((r) => folderIds.includes(r.folderId));
+  }
+  if (filter.folderId) {
+    result = result.filter((r) => r.folderId === filter.folderId);
+  }
+
+  return result;
+}
+
 interface RectificationState {
   rectifications: Rectification[];
   statusFilter: RectificationStatus | 'all';
@@ -81,18 +159,30 @@ interface RectificationState {
   batchAddRectifications: (
     rects: Omit<Rectification, 'id' | 'createdAt' | 'status' | 'dueDate' | 'isOverdue'>[]
   ) => void;
-  computeDepartmentStats: () => Record<string, { total: number; resolved: number; pending: number; processing: number; overdue: number }>;
-  computeFullDepartmentStats: () => DepartmentStat[];
-  computeFullProjectStats: (department?: string) => ProjectStat[];
-  computeFullFolderStats: (department?: string, project?: string) => FolderStat[];
-  computeCompletionRate: () => number;
-  getOverviewStats: () => { total: number; resolved: number; pending: number; processing: number; overdue: number; rate: number };
+  computeDepartmentStats: (filter?: ScopeFilter) => Record<string, { total: number; resolved: number; pending: number; processing: number; overdue: number }>;
+  computeFullDepartmentStats: (filter?: ScopeFilter) => DepartmentStat[];
+  computeFullProjectStats: (filter?: ScopeFilter) => ProjectStat[];
+  computeFullFolderStats: (filter?: ScopeFilter) => FolderStat[];
+  computeCompletionRate: (filter?: ScopeFilter) => number;
+  getOverviewStats: (filter?: ScopeFilter) => { total: number; resolved: number; pending: number; processing: number; overdue: number; rate: number };
   getRectificationsForDrill: (
     level: 'department' | 'project' | 'folder',
     department?: string,
     project?: string,
-    folderId?: string
+    folderId?: string,
+    period?: string
   ) => Rectification[];
+  getFilteredByScope: (filter: ScopeFilter) => Rectification[];
+}
+
+function isRectDataValid(rects: Rectification[]): boolean {
+  if (!rects || rects.length === 0) return false;
+  for (const r of rects) {
+    if (!r.createdAt || typeof r.createdAt !== 'string') return false;
+    const parsed = parseCreatedAt(r.createdAt);
+    if (!parsed) return false;
+  }
+  return true;
 }
 
 export const useRectificationStore = create<RectificationState>((set, get) => ({
@@ -105,12 +195,23 @@ export const useRectificationStore = create<RectificationState>((set, get) => ({
 
   initialize: () => {
     if (get().initialized) {
-      get().refreshOverdue();
+      const currentRects = get().rectifications;
+      if (!isRectDataValid(currentRects)) {
+        const data = initialRectifications.map((r) => ({
+          ...r,
+          dueDate: r.dueDate || computeDueDate(r.createdAt),
+        }));
+        const withOverdue = data.map((r) => ({ ...r, isOverdue: isOverdue(r) }));
+        set({ rectifications: withOverdue, initialized: true });
+        saveRectifications(withOverdue);
+      } else {
+        get().refreshOverdue();
+      }
       return;
     }
     const stored = loadRectifications();
     let data: Rectification[] = [];
-    if (stored && stored.length > 0) {
+    if (isRectDataValid(stored)) {
       data = stored;
     } else {
       data = initialRectifications.map((r) => ({
@@ -153,21 +254,23 @@ export const useRectificationStore = create<RectificationState>((set, get) => ({
 
   getFilteredRectifications: () => {
     const { rectifications, statusFilter, ownerFilter, departmentFilter, overdueFilter } = get();
-    let list = rectifications;
-    if (statusFilter !== 'all') list = list.filter((r) => r.status === statusFilter);
-    if (ownerFilter) list = list.filter((r) => r.ownerName === ownerFilter);
+    let list = [...rectifications];
+    if (statusFilter !== 'all') {
+      list = list.filter((r) => r.status === statusFilter);
+    }
+    if (ownerFilter) {
+      list = list.filter((r) => r.ownerName === ownerFilter);
+    }
     if (departmentFilter) {
       const folderIds = folders.filter((f) => f.department === departmentFilter).map((f) => f.id);
       list = list.filter((r) => folderIds.includes(r.folderId));
     }
-    if (overdueFilter === 'overdue') list = list.filter((r) => r.isOverdue);
-    if (overdueFilter === 'not_overdue') list = list.filter((r) => !r.isOverdue);
-    return [...list].sort((a, b) => {
-      if (a.isOverdue && !b.isOverdue) return -1;
-      if (!a.isOverdue && b.isOverdue) return 1;
-      const order = { pending: 0, processing: 1, cancelled: 2, completed: 3 } as const;
-      return order[a.status] - order[b.status];
-    });
+    if (overdueFilter === 'overdue') {
+      list = list.filter((r) => r.isOverdue);
+    } else if (overdueFilter === 'not_overdue') {
+      list = list.filter((r) => !r.isOverdue);
+    }
+    return list;
   },
 
   getOwnerList: () => {
@@ -176,112 +279,102 @@ export const useRectificationStore = create<RectificationState>((set, get) => ({
       if (!map.has(r.ownerId)) {
         map.set(r.ownerId, { id: r.ownerId, name: r.ownerName, count: 0 });
       }
-      const entry = map.get(r.ownerId)!;
-      if (r.status !== 'completed' && r.status !== 'cancelled') {
-        entry.count++;
-      }
+      map.get(r.ownerId)!.count++;
     });
     return Array.from(map.values()).sort((a, b) => b.count - a.count);
   },
 
   getDepartmentList: () => {
-    const map = new Map<string, number>();
+    const map = new Map<string, { name: string; count: number }>();
     get().rectifications.forEach((r) => {
       const folder = folders.find((f) => f.id === r.folderId);
       if (!folder) return;
-      const key = folder.department;
-      let current = map.get(key) || 0;
-      if (r.status !== 'completed' && r.status !== 'cancelled') {
-        current++;
+      if (!map.has(folder.department)) {
+        map.set(folder.department, { name: folder.department, count: 0 });
       }
-      map.set(key, current);
+      map.get(folder.department)!.count++;
     });
-    return Array.from(map.entries()).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+    return Array.from(map.values()).sort((a, b) => b.count - a.count);
   },
 
   addRectification: (rect) => {
-    const createdAt = new Date().toLocaleString('zh-CN');
+    const now = new Date();
+    const createdAt = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
     const dueDate = computeDueDate(createdAt);
     const newRect: Rectification = {
       ...rect,
-      id: `r${Date.now()}${Math.random().toString(36).slice(2, 6)}`,
+      id: `rect-${Date.now()}`,
       createdAt,
+      status: 'pending',
       dueDate,
-      status: 'pending' as RectificationStatus,
       isOverdue: false,
     };
-    const next = [newRect, ...get().rectifications];
-    set({ rectifications: next });
-    saveRectifications(next);
-  },
-
-  batchAddRectifications: (rects) => {
-    const now = Date.now();
-    const createdAt = new Date().toLocaleString('zh-CN');
-    const dueDate = computeDueDate(createdAt);
-    const newRects = rects.map((rect, idx) => ({
-      ...rect,
-      id: `r${now}${idx}${Math.random().toString(36).slice(2, 4)}`,
-      createdAt,
-      dueDate,
-      status: 'pending' as RectificationStatus,
-      isOverdue: false,
-    }));
-    const next = [...newRects, ...get().rectifications];
+    const next = [...get().rectifications, newRect];
     set({ rectifications: next });
     saveRectifications(next);
   },
 
   updateRectificationStatus: (id, status, result, screenshot, screenshotData) => {
+    const now = new Date();
+    const completedAt = status === 'completed'
+      ? `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
+      : undefined;
     if (screenshot && screenshotData) {
       saveScreenshotUtil(screenshot, screenshotData);
     }
-    const next = get().rectifications.map((r) =>
-      r.id === id
-        ? {
-            ...r,
-            status,
-            result: result ?? r.result,
-            screenshot: screenshot ?? r.screenshot,
-            completedAt: status === 'completed' ? new Date().toLocaleString('zh-CN') : r.completedAt,
-            isOverdue: false,
-          }
-        : r
-    );
+    const next = get().rectifications.map((r) => {
+      if (r.id === id) {
+        return { ...r, status, result, screenshot, completedAt, isOverdue: status === 'completed' || status === 'cancelled' ? false : r.isOverdue };
+      }
+      return r;
+    });
     set({ rectifications: next });
     saveRectifications(next);
   },
 
-  computeDepartmentStats: () => {
-    const stats: Record<
-      string,
-      { total: number; resolved: number; pending: number; processing: number; overdue: number }
-    > = {};
-    folders.forEach((folder) => {
-      if (!stats[folder.department]) {
-        stats[folder.department] = { total: 0, resolved: 0, pending: 0, processing: 0, overdue: 0 };
-      }
-    });
-    get().rectifications.forEach((r) => {
+  batchAddRectifications: (rects) => {
+    const now = new Date();
+    const createdAt = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+    const dueDate = computeDueDate(createdAt);
+    const newRects = rects.map((r, idx) => ({
+      ...r,
+      id: `rect-${Date.now()}-${idx}`,
+      createdAt,
+      status: 'pending',
+      dueDate,
+      isOverdue: false,
+    } as Rectification));
+    const next = [...get().rectifications, ...newRects];
+    set({ rectifications: next });
+    saveRectifications(next);
+  },
+
+  getFilteredByScope: (filter) => filterByScope(get().rectifications, filter),
+
+  computeDepartmentStats: (filter = {}) => {
+    const relevantRects = filterByScope(get().rectifications, filter);
+    const stats: Record<string, { total: number; resolved: number; pending: number; processing: number; overdue: number }> = {};
+    relevantRects.forEach((r) => {
       const folder = folders.find((f) => f.id === r.folderId);
       if (!folder) return;
       const dept = folder.department;
-      const s = stats[dept];
-      if (!s) return;
-      s.total++;
-      if (r.status === 'completed') s.resolved++;
-      else if (r.status === 'pending') s.pending++;
-      else if (r.status === 'processing') s.processing++;
-      if (r.isOverdue) s.overdue++;
+      if (!stats[dept]) {
+        stats[dept] = { total: 0, resolved: 0, pending: 0, processing: 0, overdue: 0 };
+      }
+      stats[dept].total++;
+      if (r.status === 'completed') stats[dept].resolved++;
+      else if (r.status === 'pending') stats[dept].pending++;
+      else if (r.status === 'processing') stats[dept].processing++;
+      if (r.isOverdue) stats[dept].overdue++;
     });
     return stats;
   },
 
-  computeFullDepartmentStats: () => {
+  computeFullDepartmentStats: (filter = {}) => {
     const stats: DepartmentStat[] = [];
-    const raw = get().computeDepartmentStats();
+    const raw = get().computeDepartmentStats(filter);
     Object.entries(raw).forEach(([name, s]) => {
-      const rects = get().getRectificationsByDepartment(name);
+      const rects = filterByScope(get().rectifications, { ...filter, department: name });
       stats.push({
         name,
         totalIssues: s.total,
@@ -292,17 +385,15 @@ export const useRectificationStore = create<RectificationState>((set, get) => ({
         rectificationIds: rects.map((r) => r.id),
       });
     });
-    return stats;
+    return stats.sort((a, b) => b.totalIssues - a.totalIssues);
   },
 
-  computeFullProjectStats: (department?) => {
-    const stats: ProjectStat[] = [];
+  computeFullProjectStats: (filter = {}) => {
+    const relevantRects = filterByScope(get().rectifications, filter);
     const projectMap = new Map<string, ProjectStat>();
-    const relevantRects = department ? get().getRectificationsByDepartment(department) : get().rectifications;
     relevantRects.forEach((r) => {
       const folder = folders.find((f) => f.id === r.folderId);
       if (!folder) return;
-      if (department && folder.department !== department) return;
       const key = `${folder.department}||${folder.project}`;
       if (!projectMap.has(key)) {
         projectMap.set(key, {
@@ -324,23 +415,15 @@ export const useRectificationStore = create<RectificationState>((set, get) => ({
       else if (r.status === 'processing') stat.processing++;
       if (r.isOverdue) stat.overdue++;
     });
-    return Array.from(projectMap.values());
+    return Array.from(projectMap.values()).sort((a, b) => b.totalIssues - a.totalIssues);
   },
 
-  computeFullFolderStats: (department?, project?) => {
-    const stats: FolderStat[] = [];
-    const relevantRects =
-      department && project
-        ? get().getRectificationsByProject(department, project)
-        : department
-        ? get().getRectificationsByDepartment(department)
-        : get().rectifications;
+  computeFullFolderStats: (filter = {}) => {
+    const relevantRects = filterByScope(get().rectifications, filter);
     const folderMap = new Map<string, FolderStat>();
     relevantRects.forEach((r) => {
       const folder = folders.find((f) => f.id === r.folderId);
       if (!folder) return;
-      if (department && folder.department !== department) return;
-      if (project && folder.project !== project) return;
       const key = folder.id;
       if (!folderMap.has(key)) {
         folderMap.set(key, {
@@ -364,35 +447,37 @@ export const useRectificationStore = create<RectificationState>((set, get) => ({
       else if (r.status === 'processing') stat.processing++;
       if (r.isOverdue) stat.overdue++;
     });
-    return Array.from(folderMap.values());
+    return Array.from(folderMap.values()).sort((a, b) => b.totalIssues - a.totalIssues);
   },
 
-  computeCompletionRate: () => {
-    const { total, resolved } = get().getOverviewStats();
+  computeCompletionRate: (filter = {}) => {
+    const { total, resolved } = get().getOverviewStats(filter);
     return total > 0 ? Math.round((resolved / total) * 100) : 0;
   },
 
-  getOverviewStats: () => {
-    const { rectifications } = get();
-    const total = rectifications.length;
-    const resolved = rectifications.filter((r) => r.status === 'completed').length;
-    const pending = rectifications.filter((r) => r.status === 'pending').length;
-    const processing = rectifications.filter((r) => r.status === 'processing').length;
-    const overdue = rectifications.filter((r) => r.isOverdue).length;
+  getOverviewStats: (filter = {}) => {
+    const relevantRects = filterByScope(get().rectifications, filter);
+    const total = relevantRects.length;
+    const resolved = relevantRects.filter((r) => r.status === 'completed').length;
+    const pending = relevantRects.filter((r) => r.status === 'pending').length;
+    const processing = relevantRects.filter((r) => r.status === 'processing').length;
+    const overdue = relevantRects.filter((r) => r.isOverdue).length;
     const rate = total > 0 ? Math.round((resolved / total) * 100) : 0;
     return { total, resolved, pending, processing, overdue, rate };
   },
 
-  getRectificationsForDrill: (level, department?, project?, folderId?) => {
+  getRectificationsForDrill: (level, department, project, folderId, period) => {
+    const filter: ScopeFilter = { period };
     if (level === 'department' && department) {
-      return get().getRectificationsByDepartment(department);
+      filter.department = department;
     }
     if (level === 'project' && department && project) {
-      return get().getRectificationsByProject(department, project);
+      filter.department = department;
+      filter.project = project;
     }
     if (level === 'folder' && folderId) {
-      return get().getRectificationsByFolderId(folderId);
+      filter.folderId = folderId;
     }
-    return [];
+    return filterByScope(get().rectifications, filter);
   },
 }));
