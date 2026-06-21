@@ -1,6 +1,8 @@
 import { NavLink } from 'react-router-dom';
 import { ShieldAlert, ClipboardList, FileBarChart, Users } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useRectificationStore } from '@/store/useRectificationStore';
+import { useEffect } from 'react';
 
 const menuItems = [
   { path: '/', label: '风险清单', icon: ShieldAlert },
@@ -9,6 +11,26 @@ const menuItems = [
 ];
 
 export default function Sidebar() {
+  const { getOverviewStats, initialize } = useRectificationStore();
+  const rectifications = useRectificationStore((state) => state.rectifications);
+  const stats = getOverviewStats();
+
+  useEffect(() => {
+    initialize();
+  }, [initialize]);
+
+  const getRateColor = (rate: number) => {
+    if (rate >= 80) return 'text-green-400';
+    if (rate >= 50) return 'text-amber-400';
+    return 'text-red-400';
+  };
+
+  const getGradientClass = (rate: number) => {
+    if (rate >= 80) return 'from-green-500 to-emerald-400';
+    if (rate >= 50) return 'from-amber-500 to-orange-400';
+    return 'from-red-500 to-rose-400';
+  };
+
   return (
     <aside className="w-64 bg-slate-900 text-white flex flex-col h-screen fixed left-0 top-0">
       <div className="h-16 flex items-center px-6 border-b border-slate-700">
@@ -49,13 +71,30 @@ export default function Sidebar() {
 
       <div className="p-4 border-t border-slate-700">
         <div className="bg-slate-800 rounded-lg p-4">
-          <p className="text-xs text-slate-400 mb-2">本月整改完成率</p>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs text-slate-400">本月整改完成率</p>
+            <span className="text-[10px] text-slate-500">
+              {stats.total} 条任务
+            </span>
+          </div>
           <div className="flex items-end gap-2">
-            <span className="text-2xl font-bold text-green-400">68%</span>
-            <span className="text-xs text-slate-500 mb-0.5">+12% 环比</span>
+            <span className={cn('text-2xl font-bold', getRateColor(stats.rate))}>
+              {stats.rate}%
+            </span>
+            <span className="text-xs text-slate-500 mb-0.5">
+              {stats.resolved}/{stats.total} 完成
+            </span>
           </div>
           <div className="mt-3 h-1.5 bg-slate-700 rounded-full overflow-hidden">
-            <div className="h-full bg-gradient-to-r from-green-500 to-emerald-400 rounded-full" style={{ width: '68%' }} />
+            <div
+              className={cn('h-full bg-gradient-to-r rounded-full transition-all duration-500', getGradientClass(stats.rate))}
+              style={{ width: `${stats.rate}%` }}
+            />
+          </div>
+          <div className="mt-3 flex items-center justify-between text-[10px] text-slate-500">
+            <span>处理中 {stats.processing}</span>
+            <span>逾期 {stats.overdue}</span>
+            <span>待处理 {stats.pending}</span>
           </div>
         </div>
       </div>

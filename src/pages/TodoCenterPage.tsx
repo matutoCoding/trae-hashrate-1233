@@ -10,18 +10,22 @@ import {
   User,
   ChevronRight,
   Search,
-  Send,
-  Image as ImageIcon,
   Upload,
   X,
   FileImage,
+  AlertCircle,
+  LayoutDashboard,
+  List,
+  Building2,
+  CalendarClock,
+  PlayCircle,
+  AlertTriangle,
 } from 'lucide-react';
 import { useRectificationStore } from '@/store/useRectificationStore';
-import type { RectificationStatus } from '@/types';
+import type { RectificationStatus, Rectification } from '@/types';
 import StatusBadge from '@/components/StatusBadge';
 import Modal from '@/components/Modal';
 import { cn } from '@/lib/utils';
-import { statusLabels } from '@/utils/format';
 import { fileToBase64, generateFileName, getScreenshot } from '@/utils/storage';
 
 const statusTabs: { value: RectificationStatus | 'all'; label: string; icon: typeof Clock }[] = [
@@ -32,6 +36,8 @@ const statusTabs: { value: RectificationStatus | 'all'; label: string; icon: typ
   { value: 'cancelled', label: '已取消', icon: XCircle },
 ];
 
+type ViewMode = 'list' | 'workbench';
+
 export default function TodoCenterPage() {
   const navigate = useNavigate();
   const {
@@ -39,14 +45,25 @@ export default function TodoCenterPage() {
     statusFilter,
     setStatusFilter,
     getFilteredRectifications,
+    getOwnerList,
+    getDepartmentList,
+    ownerFilter,
+    departmentFilter,
+    overdueFilter,
+    setOwnerFilter,
+    setDepartmentFilter,
+    setOverdueFilter,
     updateRectificationStatus,
     initialize,
+    refreshOverdue,
   } = useRectificationStore();
 
   useEffect(() => {
     initialize();
-  }, [initialize]);
+    refreshOverdue();
+  }, [initialize, refreshOverdue]);
 
+  const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [searchKeyword, setSearchKeyword] = useState('');
   const [showProcessModal, setShowProcessModal] = useState(false);
   const [selectedTodo, setSelectedTodo] = useState<string | null>(null);
@@ -55,8 +72,11 @@ export default function TodoCenterPage() {
   const [previewScreenshot, setPreviewScreenshot] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const ownerList = useMemo(() => getOwnerList(), [rectifications, getOwnerList]);
+  const departmentList = useMemo(() => getDepartmentList(), [rectifications, getDepartmentList]);
+
   const filteredTodos = useMemo(() => {
-    const list = statusFilter === 'all' ? rectifications : rectifications.filter((r) => r.status === statusFilter);
+    const list = getFilteredRectifications();
 
     if (searchKeyword) {
       const keyword = searchKeyword.toLowerCase();
@@ -64,21 +84,42 @@ export default function TodoCenterPage() {
         (r) =>
           r.folderName.toLowerCase().includes(keyword) ||
           r.auditorName.toLowerCase().includes(keyword) ||
-          r.opinion.toLowerCase().includes(keyword)
+          r.opinion.toLowerCase().includes(keyword) ||
+          r.ownerName.toLowerCase().includes(keyword)
       );
     }
-    return [...list].sort((a, b) => {
-      const order = { pending: 0, processing: 1, cancelled: 2, completed: 3 } as const;
-      return order[a.status] - order[b.status];
+    return list;
+  }, [rectifications, statusFilter, ownerFilter, departmentFilter, overdueFilter, searchKeyword, getFilteredRectifications]);
+
+  const workbenchData = useMemo(() => {
+    const activeTodos = filteredTodos.filter(
+      (r) => r.status === 'pending' || r.status === 'processing'
+    );
+
+    const byOwner = new Map<string, Rectification[]>();
+    activeTodos.forEach((r) => {
+      if (!byOwner.has(r.ownerId)) {
+        byOwner.set(r.ownerId, []);
+      }
+      byOwner.get(r.ownerId)!.push(r);
     });
-  }, [rectifications, statusFilter, searchKeyword]);
+
+    return Array.from(byOwner.entries()).map(([ownerId, items]) => {
+      const ownerName = items[0].ownerName;
+      const pending = items.filter((r) => r.status === 'pending').length;
+      const processing = items.filter((r) => r.status === 'processing').length;
+      const overdue = items.filter((r) => r.isOverdue).length;
+      return { ownerId, ownerName, items, pending, processing, overdue };
+    }).sort((a, b) => (b.overdue + b.pending) - (a.overdue + a.pending));
+  }, [filteredTodos]);
 
   const stats = useMemo(() => {
     const total = rectifications.length;
     const pending = rectifications.filter((r) => r.status === 'pending').length;
     const processing = rectifications.filter((r) => r.status === 'processing').length;
     const completed = rectifications.filter((r) => r.status === 'completed').length;
-    return { total, pending, processing, completed };
+    const overdue = rectifications.filter((r) => r.isOverdue).length;
+    return { total, pending, processing, completed, overdue };
   }, [rectifications]);
 
   const handleOpenProcess = (id: string) => {
@@ -136,6 +177,17 @@ export default function TodoCenterPage() {
 
   const currentTodo = selectedTodo ? rectifications.find((r) => r.id === selectedTodo) : null;
 
+  const clearAllFilters = () => {
+    setStatusFilter('all');
+    setOwnerFilter('');
+    setDepartmentFilter('');
+    setOverdueFilter('all');
+    setSearchKeyword('');
+  };
+
+  const hasActiveFilters =
+    statusFilter !== 'all' || ownerFilter !== '' || departmentFilter !== '' || overdueFilter !== 'all' || searchKeyword !== '';
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -143,9 +195,31 @@ export default function TodoCenterPage() {
           <h1 className="text-2xl font-bold text-gray-900">待办中心</h1>
           <p className="mt-1 text-sm text-gray-500">管理和处理权限整改任务</p>
         </div>
+        <div className="flex items-center gap-2 bg-gray-100 rounded-lg p-1">
+          <button
+            onClick={() => setViewMode('list')}
+            className={cn(
+              'flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-md transition-all',
+              viewMode === 'list' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            )}
+          >
+            <List className="w-4 h-4" />
+            列表视图
+          </button>
+          <button
+            onClick={() => setViewMode('workbench')}
+            className={cn(
+              'flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-md transition-all',
+              viewMode === 'workbench' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+            )}
+          >
+            <LayoutDashboard className="w-4 h-4" />
+            负责人工作台
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-5 gap-4">
         <div className="bg-white rounded-xl border border-gray-200 p-5">
           <div className="flex items-center justify-between">
             <div>
@@ -190,140 +264,205 @@ export default function TodoCenterPage() {
             </div>
           </div>
         </div>
+        <div className={cn(
+          'rounded-xl border p-5',
+          stats.overdue > 0 ? 'bg-gradient-to-br from-red-50 to-orange-50 border-red-200' : 'bg-white border-gray-200'
+        )}>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-500">逾期未处理</p>
+              <p className={cn('mt-2 text-3xl font-bold', stats.overdue > 0 ? 'text-red-600' : 'text-gray-400')}>
+                {stats.overdue}
+              </p>
+            </div>
+            <div className={cn('p-3 rounded-xl', stats.overdue > 0 ? 'bg-red-100' : 'bg-gray-50')}>
+              <AlertTriangle className={cn('w-6 h-6', stats.overdue > 0 ? 'text-red-600' : 'text-gray-400')} />
+            </div>
+          </div>
+          <p className={cn(
+            'mt-3 text-xs',
+            stats.overdue > 0 ? 'text-red-600' : 'text-gray-400'
+          )}>
+            {stats.overdue > 0 ? '请重点跟进催办' : '暂无逾期任务'}
+          </p>
+        </div>
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
-        <div className="border-b border-gray-100">
-          <div className="flex items-center justify-between px-5 py-3">
-            <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
-              {statusTabs.map((tab) => (
+        <div className="border-b border-gray-100 p-5">
+          <div className="flex flex-col gap-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1">
+                {statusTabs.map((tab) => (
+                  <button
+                    key={tab.value}
+                    onClick={() => setStatusFilter(tab.value)}
+                    className={cn(
+                      'flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-md transition-all',
+                      statusFilter === tab.value
+                        ? 'bg-white text-gray-900 shadow-sm'
+                        : 'text-gray-500 hover:text-gray-700'
+                    )}
+                  >
+                    <tab.icon className={cn('w-4 h-4', tab.value === 'processing' && statusFilter === tab.value && 'animate-spin')} />
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+              {hasActiveFilters && (
                 <button
-                  key={tab.value}
-                  onClick={() => setStatusFilter(tab.value)}
-                  className={cn(
-                    'flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-md transition-all',
-                    statusFilter === tab.value
-                      ? 'bg-white text-gray-900 shadow-sm'
-                      : 'text-gray-500 hover:text-gray-700'
-                  )}
+                  onClick={clearAllFilters}
+                  className="text-xs text-blue-600 hover:text-blue-700"
                 >
-                  <tab.icon className={cn('w-4 h-4', tab.value === 'processing' && statusFilter === tab.value && 'animate-spin')} />
-                  {tab.label}
+                  清除所有筛选
                 </button>
-              ))}
+              )}
             </div>
 
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <input
-                type="text"
-                value={searchKeyword}
-                onChange={(e) => setSearchKeyword(e.target.value)}
-                placeholder="搜索文件夹、审计员..."
-                className="w-64 pl-9 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2">
+                <User className="w-4 h-4 text-gray-400" />
+                <select
+                  value={ownerFilter}
+                  onChange={(e) => setOwnerFilter(e.target.value)}
+                  className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="">全部负责人</option>
+                  {ownerList.map((o) => (
+                    <option key={o.id} value={o.name}>
+                      {o.name} ({o.count})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-gray-400" />
+                <select
+                  value={departmentFilter}
+                  onChange={(e) => setDepartmentFilter(e.target.value)}
+                  className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="">全部部门</option>
+                  {departmentList.map((d) => (
+                    <option key={d.name} value={d.name}>
+                      {d.name} ({d.count})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-gray-400" />
+                <select
+                  value={overdueFilter}
+                  onChange={(e) => setOverdueFilter(e.target.value as 'all' | 'overdue' | 'not_overdue')}
+                  className="px-3 py-2 text-sm bg-gray-50 border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="all">全部状态</option>
+                  <option value="overdue">仅显示逾期</option>
+                  <option value="not_overdue">未逾期</option>
+                </select>
+              </div>
+
+              <div className="relative flex-1 max-w-xs">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <input
+                  type="text"
+                  value={searchKeyword}
+                  onChange={(e) => setSearchKeyword(e.target.value)}
+                  placeholder="搜索文件夹、审计员、负责人..."
+                  className="w-full pl-9 pr-4 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
             </div>
           </div>
         </div>
 
-        <div className="divide-y divide-gray-100">
-          {filteredTodos.length === 0 ? (
-            <div className="py-16 text-center">
-              <ClipboardList className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-              <p className="text-gray-500">暂无{statusFilter === 'all' ? '' : statusLabels[statusFilter]}任务</p>
-            </div>
-          ) : (
-            filteredTodos.map((todo) => (
-              <div
-                key={todo.id}
-                className="p-5 hover:bg-gray-50 transition-colors cursor-pointer group"
-                onClick={() => navigate(`/folder/${todo.folderId}`)}
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3">
-                      <h3 className="font-medium text-gray-900 group-hover:text-blue-600 transition-colors">
-                        {todo.folderName}
-                      </h3>
-                      <StatusBadge status={todo.status} />
-                      {todo.screenshot && todo.status === 'completed' && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handlePreviewScreenshot(todo.screenshot!);
-                          }}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-50 text-blue-600 rounded hover:bg-blue-100 transition-colors"
-                        >
-                          <FileImage className="w-3 h-3" />
-                          查看凭证
-                        </button>
-                      )}
-                    </div>
-                    <p className="mt-2 text-sm text-gray-600 line-clamp-2">
-                      {todo.opinion}
-                    </p>
-                    {todo.result && (
-                      <p className="mt-2 text-sm text-green-700 bg-green-50 rounded-lg p-3">
-                        <span className="font-medium">处理结果：</span>{todo.result}
-                      </p>
-                    )}
-                    <div className="mt-3 flex items-center gap-4 text-xs text-gray-400">
-                      <span className="flex items-center gap-1">
-                        <User className="w-3.5 h-3.5" />
-                        审计员：{todo.auditorName}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <FolderOpen className="w-3.5 h-3.5" />
-                        负责人：{todo.ownerName}
-                      </span>
-                      <span>涉及 {todo.memberIds.length} 名成员：{todo.memberNames.join('、')}</span>
-                      <span>发起时间：{todo.createdAt}</span>
-                      {todo.completedAt && (
-                        <span>完成时间：{todo.completedAt}</span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 ml-4">
-                    {todo.status === 'pending' && (
-                      <>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleStartProcessing(todo.id);
-                          }}
-                          className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors opacity-0 group-hover:opacity-100"
-                        >
-                          开始处理
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleOpenProcess(todo.id);
-                          }}
-                          className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors opacity-0 group-hover:opacity-100"
-                        >
-                          处理
-                        </button>
-                      </>
-                    )}
-                    {todo.status === 'processing' && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleOpenProcess(todo.id);
-                        }}
-                        className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors opacity-0 group-hover:opacity-100"
-                      >
-                        提交结果
-                      </button>
-                    )}
-                    <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-gray-600 transition-colors" />
-                  </div>
-                </div>
+        {viewMode === 'list' && (
+          <div className="divide-y divide-gray-100">
+            {filteredTodos.length === 0 ? (
+              <div className="py-16 text-center">
+                <ClipboardList className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                <p className="text-gray-500">暂无符合条件的任务</p>
               </div>
-            ))
-          )}
-        </div>
+            ) : (
+              filteredTodos.map((todo) => (
+                <TodoRow
+                  key={todo.id}
+                  todo={todo}
+                  onProcess={handleOpenProcess}
+                  onStartProcessing={handleStartProcessing}
+                  onPreviewScreenshot={handlePreviewScreenshot}
+                  onClickFolder={() => navigate(`/folder/${todo.folderId}`)}
+                />
+              ))
+            )}
+          </div>
+        )}
+
+        {viewMode === 'workbench' && (
+          <div className="p-5">
+            {workbenchData.length === 0 ? (
+              <div className="py-16 text-center">
+                <LayoutDashboard className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                <p className="text-gray-500">暂无待处理任务</p>
+              </div>
+            ) : (
+              <div className="space-y-6">
+                {workbenchData.map((wb) => (
+                  <div key={wb.ownerId} className="border border-gray-200 rounded-xl overflow-hidden">
+                    <div className="bg-gradient-to-r from-blue-50 to-indigo-50 px-5 py-4 border-b border-gray-200">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-full flex items-center justify-center text-white font-medium">
+                            {wb.ownerName.charAt(0)}
+                          </div>
+                          <div>
+                            <h3 className="font-semibold text-gray-900">{wb.ownerName}</h3>
+                            <p className="text-xs text-gray-500">文件夹负责人</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-amber-600">{wb.pending}</p>
+                            <p className="text-xs text-gray-500">待处理</p>
+                          </div>
+                          <div className="text-center">
+                            <p className="text-2xl font-bold text-blue-600">{wb.processing}</p>
+                            <p className="text-xs text-gray-500">处理中</p>
+                          </div>
+                          <div className="text-center">
+                            <p className={cn(
+                              'text-2xl font-bold',
+                              wb.overdue > 0 ? 'text-red-600' : 'text-gray-400'
+                            )}>
+                              {wb.overdue}
+                            </p>
+                            <p className="text-xs text-gray-500">逾期</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="divide-y divide-gray-100">
+                      {wb.items.map((todo) => (
+                        <TodoRow
+                          key={todo.id}
+                          todo={todo}
+                          onProcess={handleOpenProcess}
+                          onStartProcessing={handleStartProcessing}
+                          onPreviewScreenshot={handlePreviewScreenshot}
+                          onClickFolder={() => navigate(`/folder/${todo.folderId}`)}
+                          compact
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="flex items-center justify-between px-5 py-4 border-t border-gray-100">
           <p className="text-sm text-gray-500">
@@ -363,12 +502,21 @@ export default function TodoCenterPage() {
       >
         <div className="space-y-5">
           {currentTodo && (
-            <div className="p-4 bg-blue-50 rounded-xl">
-              <p className="text-sm font-medium text-blue-900 mb-1">
+            <div className={cn(
+              'p-4 rounded-xl',
+              currentTodo.isOverdue ? 'bg-red-50 border border-red-200' : 'bg-blue-50 border border-blue-100'
+            )}>
+              <p className={cn(
+                'text-sm font-medium mb-1',
+                currentTodo.isOverdue ? 'text-red-900' : 'text-blue-900'
+              )}>
                 {currentTodo.folderName} · 涉及 {currentTodo.memberIds.length} 人：{currentTodo.memberNames.join('、')}
               </p>
-              <p className="text-sm text-blue-700">
+              <p className={cn('text-sm', currentTodo.isOverdue ? 'text-red-800' : 'text-blue-700')}>
                 <span className="font-medium">整改要求：</span>{currentTodo.opinion}
+              </p>
+              <p className={cn('text-xs mt-2', currentTodo.isOverdue ? 'text-red-600' : 'text-blue-600')}>
+                到期日期：{currentTodo.dueDate} {currentTodo.isOverdue && <span className="font-medium">（已逾期）</span>}
               </p>
             </div>
           )}
@@ -442,6 +590,132 @@ export default function TodoCenterPage() {
           </div>
         )}
       </Modal>
+    </div>
+  );
+}
+
+function TodoRow({
+  todo,
+  onProcess,
+  onStartProcessing,
+  onPreviewScreenshot,
+  onClickFolder,
+  compact,
+}: {
+  todo: Rectification;
+  onProcess: (id: string) => void;
+  onStartProcessing: (id: string) => void;
+  onPreviewScreenshot: (fileName: string) => void;
+  onClickFolder: () => void;
+  compact?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        'hover:bg-gray-50 transition-colors cursor-pointer group',
+        todo.isOverdue && 'bg-red-50/30',
+        compact ? 'px-5 py-4' : 'p-5'
+      )}
+      onClick={onClickFolder}
+    >
+      <div className="flex items-start justify-between">
+        <div className="flex-1">
+          <div className="flex items-center gap-3 flex-wrap">
+            <h3 className="font-medium text-gray-900 group-hover:text-blue-600 transition-colors">
+              {todo.folderName}
+            </h3>
+            <StatusBadge status={todo.status} />
+            {todo.isOverdue && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-100 text-red-600 text-xs font-medium rounded">
+                <AlertCircle className="w-3 h-3" />
+                已逾期
+              </span>
+            )}
+            {todo.screenshot && todo.status === 'completed' && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onPreviewScreenshot(todo.screenshot!);
+                }}
+                className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-blue-50 text-blue-600 rounded hover:bg-blue-100 transition-colors"
+              >
+                <FileImage className="w-3 h-3" />
+                查看凭证
+              </button>
+            )}
+          </div>
+          {!compact && (
+            <>
+              <p className="mt-2 text-sm text-gray-600 line-clamp-2">
+                {todo.opinion}
+              </p>
+              {todo.result && (
+                <p className="mt-2 text-sm text-green-700 bg-green-50 rounded-lg p-3">
+                  <span className="font-medium">处理结果：</span>{todo.result}
+                </p>
+              )}
+            </>
+          )}
+          <div className={cn('flex items-center gap-4 text-xs text-gray-400 flex-wrap', !compact ? 'mt-3' : 'mt-2')}>
+            <span className="flex items-center gap-1">
+              <User className="w-3.5 h-3.5" />
+              审计员：{todo.auditorName}
+            </span>
+            <span className="flex items-center gap-1">
+              <FolderOpen className="w-3.5 h-3.5" />
+              负责人：{todo.ownerName}
+            </span>
+            <span className="flex items-center gap-1">
+              <CalendarClock className="w-3.5 h-3.5" />
+              到期：{todo.dueDate}
+            </span>
+            {!compact && (
+              <>
+                <span>涉及 {todo.memberIds.length} 名成员：{todo.memberNames.join('、')}</span>
+                <span>发起：{todo.createdAt}</span>
+                {todo.completedAt && <span>完成：{todo.completedAt}</span>}
+              </>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 ml-4 flex-shrink-0">
+          {todo.status === 'pending' && (
+            <>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onStartProcessing(todo.id);
+                }}
+                className="px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100 transition-colors opacity-0 group-hover:opacity-100 flex items-center gap-1"
+              >
+                <PlayCircle className="w-3.5 h-3.5" />
+                开始处理
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onProcess(todo.id);
+                }}
+                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors opacity-0 group-hover:opacity-100"
+              >
+                处理
+              </button>
+            </>
+          )}
+          {todo.status === 'processing' && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onProcess(todo.id);
+              }}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors opacity-0 group-hover:opacity-100"
+            >
+              提交结果
+            </button>
+          )}
+          <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-gray-600 transition-colors" />
+        </div>
+      </div>
     </div>
   );
 }

@@ -49,9 +49,11 @@ export interface Rectification {
   opinion: string;
   status: RectificationStatus;
   createdAt: string;
+  dueDate: string;
   completedAt?: string;
   result?: string;
   screenshot?: string;
+  isOverdue?: boolean;
 }
 
 export interface DepartmentStat {
@@ -59,6 +61,9 @@ export interface DepartmentStat {
   totalIssues: number;
   resolved: number;
   pending: number;
+  processing: number;
+  overdue: number;
+  rectificationIds: string[];
 }
 
 export interface ProjectStat {
@@ -67,6 +72,9 @@ export interface ProjectStat {
   totalIssues: number;
   resolved: number;
   pending: number;
+  processing: number;
+  overdue: number;
+  rectificationIds: string[];
 }
 
 export interface FolderStat {
@@ -76,6 +84,10 @@ export interface FolderStat {
   totalIssues: number;
   resolved: number;
   pending: number;
+  processing: number;
+  overdue: number;
+  rectificationIds: string[];
+  folderId?: string;
 }
 
 export interface AuditReport {
@@ -83,6 +95,8 @@ export interface AuditReport {
   totalIssues: number;
   resolved: number;
   pending: number;
+  processing: number;
+  overdue: number;
   completionRate: number;
   departmentStats: DepartmentStat[];
   projectStats: ProjectStat[];
@@ -90,3 +104,13 @@ export interface AuditReport {
 }
 
 export type ReportDimension = 'department' | 'project' | 'folder';
+
+export type DrillLevel = 'overview' | 'department' | 'project' | 'folder' | 'rectifications';
+
+export interface DrillState {
+  level: DrillLevel;
+  department?: string;
+  project?: string;
+  folderId?: string;
+  folderName?: string;
+}
