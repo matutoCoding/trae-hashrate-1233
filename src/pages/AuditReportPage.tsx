@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   FileBarChart,
   Download,
@@ -9,7 +9,7 @@ import {
   Clock,
   BarChart3,
   PieChart,
-  Filter,
+  Loader2,
 } from 'lucide-react';
 import {
   BarChart,
@@ -24,9 +24,11 @@ import {
   Pie,
   Cell,
 } from 'recharts';
-import { useReportStore } from '@/store/useReportStore';
+import { useReportStore, computeAuditReport } from '@/store/useReportStore';
+import { useRectificationStore } from '@/store/useRectificationStore';
 import type { ReportDimension } from '@/types';
 import { cn } from '@/lib/utils';
+import { exportExcel, exportPDF } from '@/utils/export';
 
 const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16'];
 
@@ -39,11 +41,21 @@ const dimensions: { value: ReportDimension; label: string }[] = [
 ];
 
 export default function AuditReportPage() {
-  const { period, dimension, setPeriod, setDimension, getReport } = useReportStore();
+  const { period, dimension, setPeriod, setDimension } = useReportStore();
+  const { rectifications, computeDepartmentStats, initialize } = useRectificationStore();
   const [showPeriodDropdown, setShowPeriodDropdown] = useState(false);
   const [chartType, setChartType] = useState<'bar' | 'pie'>('bar');
+  const [exportingExcel, setExportingExcel] = useState(false);
+  const [exportingPDF, setExportingPDF] = useState(false);
 
-  const reportData = useMemo(() => getReport(), [getReport, period, dimension]);
+  useEffect(() => {
+    initialize();
+  }, [initialize]);
+
+  const reportData = useMemo(() => {
+    const deptStats = computeDepartmentStats();
+    return computeAuditReport(period, deptStats);
+  }, [period, rectifications, computeDepartmentStats]);
 
   const chartData = useMemo(() => {
     if (dimension === 'department') {
@@ -102,6 +114,30 @@ export default function AuditReportPage() {
     return reportData.folderStats;
   }, [reportData, dimension]);
 
+  const handleExportExcel = async () => {
+    setExportingExcel(true);
+    try {
+      await exportExcel(reportData, dimension);
+    } catch (err) {
+      console.error(err);
+      alert('导出Excel失败');
+    } finally {
+      setExportingExcel(false);
+    }
+  };
+
+  const handleExportPDF = async () => {
+    setExportingPDF(true);
+    try {
+      await exportPDF(reportData, dimension);
+    } catch (err) {
+      console.error(err);
+      alert('生成PDF失败');
+    } finally {
+      setExportingPDF(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -110,13 +146,39 @@ export default function AuditReportPage() {
           <p className="mt-1 text-sm text-gray-500">多维度权限风险分析，支持季度内控检查</p>
         </div>
         <div className="flex items-center gap-3">
-          <button className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2">
-            <FileBarChart className="w-4 h-4" />
-            生成PDF
+          <button
+            onClick={handleExportPDF}
+            disabled={exportingPDF}
+            className={cn(
+              'px-4 py-2 text-sm font-medium border rounded-lg transition-colors flex items-center gap-2 shadow-sm',
+              exportingPDF
+                ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'
+                : 'text-gray-700 bg-white border-gray-300 hover:bg-gray-50'
+            )}
+          >
+            {exportingPDF ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <FileBarChart className="w-4 h-4" />
+            )}
+            {exportingPDF ? '生成中...' : '生成PDF'}
           </button>
-          <button className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors shadow-sm flex items-center gap-2">
-            <Download className="w-4 h-4" />
-            导出Excel
+          <button
+            onClick={handleExportExcel}
+            disabled={exportingExcel}
+            className={cn(
+              'px-4 py-2 text-sm font-medium rounded-lg transition-colors flex items-center gap-2 shadow-sm',
+              exportingExcel
+                ? 'bg-blue-400 text-white cursor-not-allowed'
+                : 'bg-blue-600 text-white hover:bg-blue-700'
+            )}
+          >
+            {exportingExcel ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4" />
+            )}
+            {exportingExcel ? '导出中...' : '导出Excel'}
           </button>
         </div>
       </div>
@@ -134,7 +196,7 @@ export default function AuditReportPage() {
           </div>
           <div className="mt-3 flex items-center gap-1 text-sm text-blue-200">
             <TrendingUp className="w-4 h-4" />
-            较上月增长 12%
+            按实时整改统计
           </div>
         </div>
 
@@ -183,7 +245,7 @@ export default function AuditReportPage() {
           </div>
           <div className="mt-3 flex items-center gap-1 text-xs text-green-600">
             <TrendingUp className="w-3.5 h-3.5" />
-            较上月提升 8 个百分点
+            实时同步整改数据
           </div>
         </div>
       </div>

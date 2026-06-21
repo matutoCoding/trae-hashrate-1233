@@ -1,5 +1,5 @@
 import { useParams, useNavigate } from 'react-router-dom';
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
   ArrowLeft,
   FolderOpen,
@@ -16,7 +16,9 @@ import {
   Send,
   FileText,
   Image as ImageIcon,
-  Upload,
+  Building2,
+  FileImage,
+  Download,
 } from 'lucide-react';
 import { useFolderStore } from '@/store/useFolderStore';
 import { useRectificationStore } from '@/store/useRectificationStore';
@@ -26,6 +28,8 @@ import StatusBadge from '@/components/StatusBadge';
 import Modal from '@/components/Modal';
 import { roleLabels, formatFileSize } from '@/utils/format';
 import { cn } from '@/lib/utils';
+import { getScreenshot } from '@/utils/storage';
+import { exportMembersExcel } from '@/utils/export';
 
 const actionTypes = [
   { value: 'revoke_permission', label: '收回权限' },
@@ -38,7 +42,11 @@ export default function FolderDetailPage() {
   const { id = '' } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { getFolderById, getMembersByFolderId } = useFolderStore();
-  const { getRectificationsByFolderId, addRectification } = useRectificationStore();
+  const { getRectificationsByFolderId, addRectification, initialize } = useRectificationStore();
+
+  useEffect(() => {
+    initialize();
+  }, [initialize]);
 
   const folder = getFolderById(id);
   const members = getMembersByFolderId(id);
@@ -49,6 +57,7 @@ export default function FolderDetailPage() {
   const [actionType, setActionType] = useState('revoke_permission');
   const [opinion, setOpinion] = useState('');
   const [activeTab, setActiveTab] = useState<'members' | 'records'>('members');
+  const [previewScreenshot, setPreviewScreenshot] = useState<{ name: string; data: string } | null>(null);
 
   const selectedMembersData = useMemo(
     () => members.filter((m) => selectedMembers.includes(m.id)),
@@ -67,7 +76,7 @@ export default function FolderDetailPage() {
     if (checked) {
       setSelectedMembers([...selectedMembers, memberId]);
     } else {
-      setSelectedMembers(selectedMembers.filter((id) => id !== memberId));
+      setSelectedMembers(selectedMembers.filter((mid) => mid !== memberId));
     }
   };
 
@@ -92,6 +101,20 @@ export default function FolderDetailPage() {
     setOpinion('');
   };
 
+  const handlePreviewScreenshot = (fileName: string) => {
+    const data = getScreenshot(fileName);
+    if (data) {
+      setPreviewScreenshot({ name: fileName, data });
+    } else {
+      alert('截图凭证尚未保存或已丢失');
+    }
+  };
+
+  const handleExportMembers = () => {
+    if (!folder) return;
+    exportMembersExcel(folder.name, members);
+  };
+
   if (!folder) {
     return (
       <div className="flex items-center justify-center h-96">
@@ -111,6 +134,8 @@ export default function FolderDetailPage() {
     { icon: Clock, label: '最近访问', value: folder.lastAccessed },
   ];
 
+  const resolvedCount = rectifications.filter((r) => r.status === 'completed').length;
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-4">
@@ -124,6 +149,9 @@ export default function FolderDetailPage() {
           <div className="flex items-center gap-3">
             <h1 className="text-xl font-bold text-gray-900">{folder.name}</h1>
             <RiskLevelTag level={folder.riskLevel} />
+            <span className="px-2 py-0.5 text-xs rounded-full bg-blue-50 text-blue-600 border border-blue-100">
+              整改：{resolvedCount}/{rectifications.length} 已完成
+            </span>
           </div>
           <div className="flex items-center gap-2 mt-1">
             {folder.riskTypes.map((type) => (
@@ -132,7 +160,11 @@ export default function FolderDetailPage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <button className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+          <button
+            onClick={handleExportMembers}
+            className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2"
+          >
+            <Download className="w-4 h-4" />
             导出成员列表
           </button>
           <button
@@ -256,19 +288,24 @@ export default function FolderDetailPage() {
               <div className="text-center py-12">
                 <FileText className="w-12 h-12 text-gray-300 mx-auto mb-3" />
                 <p className="text-gray-500">暂无整改记录</p>
+                <p className="mt-1 text-xs text-gray-400">在「成员权限」Tab 勾选成员后发起整改</p>
               </div>
             ) : (
               <div className="space-y-4">
                 {rectifications.map((record) => (
                   <div key={record.id} className="border border-gray-200 rounded-xl p-5 hover:border-gray-300 transition-colors">
                     <div className="flex items-start justify-between">
-                      <div className="flex items-start gap-4">
+                      <div className="flex items-start gap-4 flex-1">
                         <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
                           <Shield className="w-5 h-5 text-blue-600" />
                         </div>
-                        <div>
+                        <div className="flex-1">
                           <div className="flex items-center gap-3">
-                            <h4 className="font-medium text-gray-900">{record.actionType === 'revoke_permission' ? '收回权限' : '权限调整'}</h4>
+                            <h4 className="font-medium text-gray-900">
+                              {record.actionType === 'revoke_permission' ? '收回权限' :
+                               record.actionType === 'change_to_viewer' ? '改为仅查看' :
+                               record.actionType === 'verify_identity' ? '身份核实' : '其他处理'}
+                            </h4>
                             <StatusBadge status={record.status} />
                           </div>
                           <p className="text-sm text-gray-500 mt-1">
@@ -285,20 +322,27 @@ export default function FolderDetailPage() {
                             </p>
                           </div>
                           {record.result && (
-                            <div className="mt-3 p-3 bg-green-50 rounded-lg">
+                            <div className="mt-3 p-3 bg-green-50 rounded-lg border border-green-100">
                               <p className="text-sm text-gray-700">
                                 <span className="font-medium">处理结果：</span>
                                 {record.result}
                               </p>
                               {record.screenshot && (
-                                <div className="mt-2 flex items-center gap-2 text-sm text-blue-600">
-                                  <ImageIcon className="w-4 h-4" />
-                                  <span>查看截图凭证</span>
+                                <div className="mt-3">
+                                  <button
+                                    onClick={() => handlePreviewScreenshot(record.screenshot!)}
+                                    className="inline-flex items-center gap-2 p-2 bg-white border border-green-200 rounded-lg hover:bg-green-50 transition-colors"
+                                  >
+                                    <FileImage className="w-4 h-4 text-green-600" />
+                                    <span className="text-sm text-green-700 font-medium">
+                                      查看凭证（{record.screenshot.split('_').pop()}）
+                                    </span>
+                                  </button>
                                 </div>
                               )}
                               {record.completedAt && (
                                 <p className="text-xs text-gray-500 mt-2">
-                                  完成时间：{record.completedAt}
+                                  完成时间：{record.completedAt} · 负责人：{record.ownerName}
                                 </p>
                               )}
                             </div>
@@ -400,9 +444,29 @@ export default function FolderDetailPage() {
               rows={4}
               className="w-full px-4 py-3 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none"
             />
-            <p className="text-xs text-gray-400 mt-1">整改意见将发送给文件夹负责人：{folder.ownerName}</p>
+            <p className="text-xs text-gray-400 mt-1">整改意见将发送给文件夹负责人：{folder.ownerName}，并同步到待办中心</p>
           </div>
         </div>
+      </Modal>
+
+      <Modal
+        isOpen={!!previewScreenshot}
+        onClose={() => setPreviewScreenshot(null)}
+        title="整改凭证截图"
+        size="lg"
+      >
+        {previewScreenshot && (
+          <div className="space-y-3">
+            <p className="text-xs text-gray-500 break-all">文件名：{previewScreenshot.name}</p>
+            <div className="flex items-center justify-center bg-gray-50 rounded-lg p-4 border border-gray-100">
+              <img
+                src={previewScreenshot.data}
+                alt="凭证"
+                className="max-h-[60vh] max-w-full rounded-md shadow-md"
+              />
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );
@@ -486,19 +550,5 @@ function MemberRow({ member, selected, onSelect }: { member: Member; selected: b
         )}
       </td>
     </tr>
-  );
-}
-
-function Building2(props: { className?: string }) {
-  return (
-    <svg
-      {...props}
-      fill="none"
-      viewBox="0 0 24 24"
-      stroke="currentColor"
-      strokeWidth={2}
-    >
-      <path strokeLinecap="round" strokeLinejoin="round" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-    </svg>
   );
 }
