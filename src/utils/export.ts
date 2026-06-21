@@ -53,38 +53,52 @@ export async function exportExcel(
   ws1['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 1 } }];
   XLSX.utils.book_append_sheet(wb, ws1, '概览');
 
-  // Sheet2: 明细
-  const headers = ['名称'];
-  if (drill.level !== 'department') headers.push('所属部门');
-  if (drill.level === 'folder') headers.push('所属项目');
-  headers.push('问题总数', '已处理', '处理中', '待处理', '逾期', '完成率');
+  // Sheet2: 明细 - 停在哪一级就用哪一级的下一级明细
+  let detailTitle = '部门明细';
+  const headers: string[] = [];
+  const detailData: any[][] = [];
 
-  const detailData: any[][] = [headers];
-
-  const deptStats = (report.departmentStats?.length ? report.departmentStats : [])
-    .map((s) => ({ ...s, type: 'dept' }));
-  const projStats = (report.projectStats?.length ? report.projectStats : [])
-    .map((s) => ({ ...s, type: 'proj' }));
-  const folderStats = (report.folderStats?.length ? report.folderStats : [])
-    .map((s) => ({ ...s, type: 'folder' }));
-
-  const statsSource =
-    drill.level === 'project'
-      ? projStats.filter((s: any) => s.department === drill.department)
-      : drill.level === 'folder'
-      ? folderStats.filter((s: any) => s.department === drill.department && s.project === drill.project)
-      : drill.level === 'rectifications'
-      ? folderStats.filter((s: any) => s.folderId === drill.folderId)
-      : deptStats;
-
-  statsSource.forEach((s: any) => {
-    const row: any[] = [s.name];
-    if (drill.level !== 'department') row.push(s.department || '-');
-    if (drill.level === 'folder') row.push(s.project || '-');
-    const rate = s.totalIssues > 0 ? Math.round((s.resolved / s.totalIssues) * 100) : 0;
-    row.push(s.totalIssues, s.resolved, s.processing || 0, s.pending, s.overdue || 0, `${rate}%`);
-    detailData.push(row);
-  });
+  if (drill.level === 'overview') {
+    // 概览页：部门明细
+    detailTitle = '部门明细';
+    headers.push('部门名称', '问题总数', '已处理', '处理中', '待处理', '逾期', '完成率');
+    detailData.push(headers);
+    const stats = report.departmentStats || [];
+    stats.forEach((s: any) => {
+      const rate = s.totalIssues > 0 ? Math.round((s.resolved / s.totalIssues) * 100) : 0;
+      detailData.push([s.name, s.totalIssues, s.resolved, s.processing || 0, s.pending, s.overdue || 0, `${rate}%`]);
+    });
+  } else if (drill.level === 'department') {
+    // 部门页：项目明细
+    detailTitle = `${drill.department} - 项目明细`;
+    headers.push('项目名称', '所属部门', '问题总数', '已处理', '处理中', '待处理', '逾期', '完成率');
+    detailData.push(headers);
+    const stats = (report.projectStats || []).filter((s: any) => s.department === drill.department);
+    stats.forEach((s: any) => {
+      const rate = s.totalIssues > 0 ? Math.round((s.resolved / s.totalIssues) * 100) : 0;
+      detailData.push([s.name, s.department, s.totalIssues, s.resolved, s.processing || 0, s.pending, s.overdue || 0, `${rate}%`]);
+    });
+  } else if (drill.level === 'project') {
+    // 项目页：文件夹明细
+    detailTitle = `${drill.project} - 文件夹明细`;
+    headers.push('文件夹名称', '所属部门', '所属项目', '问题总数', '已处理', '处理中', '待处理', '逾期', '完成率');
+    detailData.push(headers);
+    const stats = (report.folderStats || []).filter((s: any) => s.department === drill.department && s.project === drill.project);
+    stats.forEach((s: any) => {
+      const rate = s.totalIssues > 0 ? Math.round((s.resolved / s.totalIssues) * 100) : 0;
+      detailData.push([s.name, s.department, s.project, s.totalIssues, s.resolved, s.processing || 0, s.pending, s.overdue || 0, `${rate}%`]);
+    });
+  } else {
+    // 文件夹页 / 整改单页：只看当前文件夹
+    detailTitle = drill.folderName || '文件夹详情';
+    headers.push('文件夹名称', '所属部门', '所属项目', '问题总数', '已处理', '处理中', '待处理', '逾期', '完成率');
+    detailData.push(headers);
+    const stats = (report.folderStats || []).filter((s: any) => s.folderId === drill.folderId);
+    stats.forEach((s: any) => {
+      const rate = s.totalIssues > 0 ? Math.round((s.resolved / s.totalIssues) * 100) : 0;
+      detailData.push([s.name, s.department, s.project, s.totalIssues, s.resolved, s.processing || 0, s.pending, s.overdue || 0, `${rate}%`]);
+    });
+  }
 
   const ws2 = XLSX.utils.aoa_to_sheet(detailData);
   ws2['!cols'] = headers.map(() => ({ wch: 18 }));

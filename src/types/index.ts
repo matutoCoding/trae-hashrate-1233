@@ -54,6 +54,36 @@ export interface Rectification {
   result?: string;
   screenshot?: string;
   isOverdue?: boolean;
+  lastReminderAt?: string;
+  reminderCount?: number;
+}
+
+export interface ReminderRecord {
+  id: string;
+  rectificationId: string;
+  folderName: string;
+  remindedBy: string;
+  remindedByName: string;
+  remindedAt: string;
+  message?: string;
+}
+
+export interface TrendDataPoint {
+  month: string;
+  monthLabel: string;
+  newCount: number;
+  completedCount: number;
+  pendingCount: number;
+  overdueCount: number;
+}
+
+export interface ScopeFilterOptions {
+  period?: string;
+  department?: string;
+  project?: string;
+  folderId?: string;
+  riskType?: string;
+  status?: RectificationStatus | 'all';
 }
 
 export interface DepartmentStat {

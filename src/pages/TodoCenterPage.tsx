@@ -20,6 +20,7 @@ import {
   CalendarClock,
   PlayCircle,
   AlertTriangle,
+  Bell,
 } from 'lucide-react';
 import { useRectificationStore } from '@/store/useRectificationStore';
 import type { RectificationStatus, Rectification } from '@/types';
@@ -609,6 +610,9 @@ function TodoRow({
   onClickFolder: () => void;
   compact?: boolean;
 }) {
+  const { getLastReminderTime } = useRectificationStore();
+  const lastRemind = getLastReminderTime(todo.id);
+
   return (
     <div
       className={cn(
@@ -629,6 +633,12 @@ function TodoRow({
               <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-100 text-red-600 text-xs font-medium rounded">
                 <AlertCircle className="w-3 h-3" />
                 已逾期
+              </span>
+            )}
+            {todo.reminderCount && todo.reminderCount > 0 && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-orange-50 text-orange-600 text-xs font-medium rounded">
+                <Bell className="w-3 h-3" />
+                已催办 {todo.reminderCount} 次
               </span>
             )}
             {todo.screenshot && todo.status === 'completed' && (
@@ -669,6 +679,12 @@ function TodoRow({
               <CalendarClock className="w-3.5 h-3.5" />
               到期：{todo.dueDate}
             </span>
+            {lastRemind && (
+              <span className="flex items-center gap-1 text-orange-500">
+                <Bell className="w-3.5 h-3.5" />
+                最近催办：{lastRemind}
+              </span>
+            )}
             {!compact && (
               <>
                 <span>涉及 {todo.memberIds.length} 名成员：{todo.memberNames.join('、')}</span>

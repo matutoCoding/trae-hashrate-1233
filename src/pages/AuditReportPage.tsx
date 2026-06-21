@@ -22,6 +22,12 @@ import {
   XCircle,
   PlayCircle,
   ClipboardList,
+  Filter,
+  Bell,
+  CheckSquare,
+  Square,
+  X,
+  Megaphone,
 } from 'lucide-react';
 import {
   BarChart,
@@ -32,10 +38,12 @@ import {
   Tooltip,
   ResponsiveContainer,
   Legend,
+  LineChart,
+  Line,
 } from 'recharts';
 import { useReportStore } from '@/store/useReportStore';
 import { useRectificationStore } from '@/store/useRectificationStore';
-import type { DrillState, DepartmentStat, ProjectStat, FolderStat, Rectification, AuditReport } from '@/types';
+import type { DrillState, DepartmentStat, ProjectStat, FolderStat, Rectification, AuditReport, RectificationStatus, RiskType } from '@/types';
 import { cn } from '@/lib/utils';
 import { exportExcel, exportPDF } from '@/utils/export';
 import { getScreenshot, clearAllData } from '@/utils/storage';
@@ -45,6 +53,21 @@ import Modal from '@/components/Modal';
 const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16'];
 
 const periods = ['2025年6月', '2025年5月', '2025年4月', '2025年Q2', '2025年Q1'];
+
+const riskTypeOptions: { value: string; label: string }[] = [
+  { value: 'all', label: '全部风险类型' },
+  { value: 'external_access', label: '外部可访问' },
+  { value: 'resigned_access', label: '离职人员权限' },
+  { value: 'too_many_editors', label: '可编辑人数过多' },
+  { value: 'long_unaccessed', label: '长期未访问' },
+];
+
+const statusOptions: { value: RectificationStatus | 'all'; label: string }[] = [
+  { value: 'all', label: '全部状态' },
+  { value: 'pending', label: '待处理' },
+  { value: 'processing', label: '处理中' },
+  { value: 'completed', label: '已完成' },
+];
 
 export default function AuditReportPage() {
   const navigate = useNavigate();
@@ -59,14 +82,24 @@ export default function AuditReportPage() {
     getFilteredByScope,
     initialize,
     updateRectificationStatus,
+    computeTrendData,
+    batchRemind,
+    getLastReminderTime,
   } = useRectificationStore();
 
   const [showPeriodDropdown, setShowPeriodDropdown] = useState(false);
+  const [showFilterPanel, setShowFilterPanel] = useState(false);
   const [exportingExcel, setExportingExcel] = useState(false);
   const [exportingPDF, setExportingPDF] = useState(false);
   const [previewScreenshot, setPreviewScreenshot] = useState<{ name: string; data: string } | null>(null);
   const [showProcessModal, setShowProcessModal] = useState(false);
   const [selectedRect, setSelectedRect] = useState<string | null>(null);
+  const [riskTypeFilter, setRiskTypeFilter] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<RectificationStatus | 'all'>('all');
+  const [selectedRectIds, setSelectedRectIds] = useState<string[]>([]);
+  const [showRemindModal, setShowRemindModal] = useState(false);
+  const [remindMessage, setRemindMessage] = useState('');
+  const [remindSuccess, setRemindSuccess] = useState(false);
 
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
@@ -79,19 +112,21 @@ export default function AuditReportPage() {
   }, [initialize]);
 
   const scopeFilter = useMemo(() => {
-    const filter: { period?: string; department?: string; project?: string; folderId?: string } = { period };
+    const filter: { period?: string; department?: string; project?: string; folderId?: string; riskType?: string; status?: RectificationStatus | 'all' } = { period };
     if (drill.department) filter.department = drill.department;
     if (drill.project) filter.project = drill.project;
     if (drill.folderId) filter.folderId = drill.folderId;
+    if (riskTypeFilter !== 'all') filter.riskType = riskTypeFilter;
+    if (statusFilter !== 'all') filter.status = statusFilter;
     return filter;
-  }, [period, drill]);
+  }, [period, drill, riskTypeFilter, statusFilter]);
 
   const currentStats = useMemo(() => {
     return getOverviewStats(scopeFilter);
-  }, [rectifications, period, drill, getOverviewStats]);
+  }, [rectifications, period, drill, riskTypeFilter, statusFilter, getOverviewStats]);
 
   const drillContent = useMemo(() => {
-    const filter = { period };
+    const filter = { period, riskType: riskTypeFilter !== 'all' ? riskTypeFilter : undefined, status: statusFilter !== 'all' ? statusFilter : undefined };
 
     if (drill.level === 'overview') {
       return computeFullDepartmentStats(filter);
@@ -106,7 +141,7 @@ export default function AuditReportPage() {
       return computeFullFolderStats({ ...filter, folderId: drill.folderId });
     }
     return [];
-  }, [drill, rectifications, period, computeFullDepartmentStats, computeFullProjectStats, computeFullFolderStats]);
+  }, [drill, rectifications, period, riskTypeFilter, statusFilter, computeFullDepartmentStats, computeFullProjectStats, computeFullFolderStats]);
 
   const drillRectifications = useMemo(() => {
     if (drill.level === 'rectifications') {
@@ -115,7 +150,9 @@ export default function AuditReportPage() {
         drill.department,
         drill.project,
         drill.folderId,
-        period
+        period,
+        riskTypeFilter !== 'all' ? riskTypeFilter : undefined,
+        statusFilter !== 'all' ? statusFilter : undefined
       ).sort((a, b) => {
         if (a.isOverdue && !b.isOverdue) return -1;
         if (!a.isOverdue && b.isOverdue) return 1;
@@ -124,11 +161,24 @@ export default function AuditReportPage() {
       return rects;
     }
     return [];
-  }, [drill, rectifications, period, getRectificationsForDrill]);
+  }, [drill, rectifications, period, riskTypeFilter, statusFilter, getRectificationsForDrill]);
 
   const currentScopeRectifications = useMemo(() => {
     return getFilteredByScope(scopeFilter);
   }, [rectifications, scopeFilter, getFilteredByScope]);
+
+  const trendData = useMemo(() => {
+    return computeTrendData(6, scopeFilter);
+  }, [rectifications, scopeFilter, computeTrendData]);
+
+  const trendChartData = useMemo(() => {
+    return trendData.map((item) => ({
+      name: item.monthLabel,
+      新增: item.newCount,
+      完成: item.completedCount,
+      遗留: item.pendingCount,
+    }));
+  }, [trendData]);
 
   const chartData = useMemo(() => {
     if (drill.level === 'rectifications') return [];
@@ -180,14 +230,50 @@ export default function AuditReportPage() {
     setPeriod(p);
     resetDrill();
     setShowPeriodDropdown(false);
+    setSelectedRectIds([]);
+  };
+
+  const handleToggleSelectAll = () => {
+    if (selectedRectIds.length === drillRectifications.length) {
+      setSelectedRectIds([]);
+    } else {
+      setSelectedRectIds(drillRectifications.map((r) => r.id));
+    }
+  };
+
+  const handleToggleSelect = (id: string) => {
+    if (selectedRectIds.includes(id)) {
+      setSelectedRectIds(selectedRectIds.filter((i) => i !== id));
+    } else {
+      setSelectedRectIds([...selectedRectIds, id]);
+    }
+  };
+
+  const handleBatchRemind = () => {
+    if (selectedRectIds.length === 0) return;
+    setShowRemindModal(true);
+  };
+
+  const handleConfirmRemind = async () => {
+    if (selectedRectIds.length === 0) return;
+    batchRemind(selectedRectIds, remindMessage.trim() || undefined);
+    setRemindSuccess(true);
+    setTimeout(() => {
+      setShowRemindModal(false);
+      setRemindSuccess(false);
+      setRemindMessage('');
+      setSelectedRectIds([]);
+    }, 1500);
   };
 
   const handleDrillToDepartment = (stat: DepartmentStat) => {
     setDrill({ level: 'department', department: stat.name });
+    setSelectedRectIds([]);
   };
 
   const handleDrillToProject = (stat: ProjectStat) => {
     setDrill({ level: 'project', department: stat.department, project: stat.name });
+    setSelectedRectIds([]);
   };
 
   const handleDrillToFolder = (stat: FolderStat) => {
@@ -198,6 +284,7 @@ export default function AuditReportPage() {
       folderId: stat.folderId,
       folderName: stat.name,
     });
+    setSelectedRectIds([]);
   };
 
   const handleDrillToRectifications = (stat: FolderStat) => {
@@ -208,26 +295,33 @@ export default function AuditReportPage() {
       folderId: stat.folderId,
       folderName: stat.name,
     });
+    setSelectedRectIds([]);
   };
 
   const handleBreadcrumbClick = (drillState?: DrillState) => {
     if (drillState) {
       setDrill(drillState);
+      setSelectedRectIds([]);
     }
   };
 
   const handleExportExcel = async () => {
     setExportingExcel(true);
     try {
-      const deptStats = computeFullDepartmentStats({ period });
+      const filter = { 
+        period,
+        riskType: riskTypeFilter !== 'all' ? riskTypeFilter : undefined,
+        status: statusFilter !== 'all' ? statusFilter : undefined,
+      };
+      const deptStats = computeFullDepartmentStats(filter);
       const projStats = drill.department
-        ? computeFullProjectStats({ period, department: drill.department })
-        : computeFullProjectStats({ period });
+        ? computeFullProjectStats({ ...filter, department: drill.department })
+        : computeFullProjectStats(filter);
       const foldStats = drill.department && drill.project
-        ? computeFullFolderStats({ period, department: drill.department, project: drill.project })
+        ? computeFullFolderStats({ ...filter, department: drill.department, project: drill.project })
         : drill.folderId
-        ? computeFullFolderStats({ period, folderId: drill.folderId })
-        : computeFullFolderStats({ period });
+        ? computeFullFolderStats({ ...filter, folderId: drill.folderId })
+        : computeFullFolderStats(filter);
 
       const report: AuditReport = {
         period,
@@ -258,15 +352,20 @@ export default function AuditReportPage() {
   const handleExportPDF = async () => {
     setExportingPDF(true);
     try {
-      const deptStats = computeFullDepartmentStats({ period });
+      const filter = { 
+        period,
+        riskType: riskTypeFilter !== 'all' ? riskTypeFilter : undefined,
+        status: statusFilter !== 'all' ? statusFilter : undefined,
+      };
+      const deptStats = computeFullDepartmentStats(filter);
       const projStats = drill.department
-        ? computeFullProjectStats({ period, department: drill.department })
-        : computeFullProjectStats({ period });
+        ? computeFullProjectStats({ ...filter, department: drill.department })
+        : computeFullProjectStats(filter);
       const foldStats = drill.department && drill.project
-        ? computeFullFolderStats({ period, department: drill.department, project: drill.project })
+        ? computeFullFolderStats({ ...filter, department: drill.department, project: drill.project })
         : drill.folderId
-        ? computeFullFolderStats({ period, folderId: drill.folderId })
-        : computeFullFolderStats({ period });
+        ? computeFullFolderStats({ ...filter, folderId: drill.folderId })
+        : computeFullFolderStats(filter);
 
       const report: AuditReport = {
         period,
@@ -320,6 +419,14 @@ export default function AuditReportPage() {
             统计范围：<span className="font-medium text-gray-700">{scopeLabel}</span>
             {' · '}
             周期：<span className="font-medium text-gray-700">{period}</span>
+            {(riskTypeFilter !== 'all' || statusFilter !== 'all') && (
+              <>
+                {' · '}
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded text-xs font-medium">
+                  已筛选
+                </span>
+              </>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -372,6 +479,24 @@ export default function AuditReportPage() {
           </div>
 
           <button
+            onClick={() => setShowFilterPanel(!showFilterPanel)}
+            className={cn(
+              'flex items-center gap-2 px-4 py-2 border rounded-lg transition-colors',
+              showFilterPanel || riskTypeFilter !== 'all' || statusFilter !== 'all'
+                ? 'bg-blue-50 border-blue-300 text-blue-700'
+                : 'bg-white border-gray-200 hover:bg-gray-50 text-gray-700'
+            )}
+          >
+            <Filter className="w-4 h-4" />
+            <span className="text-sm font-medium">筛选</span>
+            {(riskTypeFilter !== 'all' || statusFilter !== 'all') && (
+              <span className="w-5 h-5 bg-blue-600 text-white text-xs rounded-full flex items-center justify-center">
+                {(riskTypeFilter !== 'all' ? 1 : 0) + (statusFilter !== 'all' ? 1 : 0)}
+              </span>
+            )}
+          </button>
+
+          <button
             onClick={handleExportPDF}
             disabled={exportingPDF}
             className="flex items-center gap-2 px-4 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
@@ -389,6 +514,54 @@ export default function AuditReportPage() {
           </button>
         </div>
       </div>
+
+      {showFilterPanel && (
+        <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-900">筛选条件</h3>
+            <button
+              onClick={() => {
+                setRiskTypeFilter('all');
+                setStatusFilter('all');
+                setShowFilterPanel(false);
+              }}
+              className="text-xs text-gray-500 hover:text-gray-700"
+            >
+              重置筛选
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">风险类型</label>
+              <select
+                value={riskTypeFilter}
+                onChange={(e) => setRiskTypeFilter(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              >
+                {riskTypeOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">整改状态</label>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as RectificationStatus | 'all')}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              >
+                {statusOptions.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-5 gap-4">
         <div className="bg-white rounded-xl border border-gray-200 p-5">
@@ -473,6 +646,40 @@ export default function AuditReportPage() {
             {currentStats.overdue > 0 ? '请重点跟进催办' : '暂无逾期任务'}
           </p>
         </div>
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-gray-900">整改趋势分析</h2>
+          <span className="text-xs text-gray-500">最近 6 个月</span>
+        </div>
+        {trendChartData.length > 0 ? (
+          <div className="h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={trendChartData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#E5E7EB" />
+                <XAxis dataKey="name" tick={{ fontSize: 12, fill: '#6B7280' }} />
+                <YAxis tick={{ fontSize: 12, fill: '#6B7280' }} />
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: '#fff',
+                    border: '1px solid #E5E7EB',
+                    borderRadius: '8px',
+                    fontSize: '12px',
+                  }}
+                />
+                <Legend />
+                <Line type="monotone" dataKey="新增" stroke="#3B82F6" strokeWidth={2} dot={{ r: 4 }} />
+                <Line type="monotone" dataKey="完成" stroke="#10B981" strokeWidth={2} dot={{ r: 4 }} />
+                <Line type="monotone" dataKey="遗留" stroke="#F59E0B" strokeWidth={2} dot={{ r: 4 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <div className="h-64 flex items-center justify-center text-gray-400">
+            <p>暂无趋势数据</p>
+          </div>
+        )}
       </div>
 
       {drill.level !== 'rectifications' && (
@@ -561,12 +768,35 @@ export default function AuditReportPage() {
       {drill.level === 'rectifications' && (
         <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
           <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-gray-900">
-              {drill.folderName} - 整改单列表
-            </h2>
-            <span className="text-sm text-gray-500">
-              共 <span className="font-medium text-gray-900">{drillRectifications.length}</span> 条记录
-            </span>
+            <div className="flex items-center gap-4">
+              <button
+                onClick={handleToggleSelectAll}
+                className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900"
+              >
+                {selectedRectIds.length === drillRectifications.length && drillRectifications.length > 0 ? (
+                  <CheckSquare className="w-5 h-5 text-blue-600" />
+                ) : (
+                  <Square className="w-5 h-5 text-gray-400" />
+                )}
+                <span className="text-sm text-gray-700">
+                  {selectedRectIds.length > 0 ? `已选 ${selectedRectIds.length} 项` : '全选'}
+                </span>
+              </button>
+            </div>
+            <div className="flex items-center gap-3">
+              {selectedRectIds.length > 0 && (
+                <button
+                  onClick={handleBatchRemind}
+                  className="flex items-center gap-2 px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 transition-colors text-sm font-medium"
+                >
+                  <Megaphone className="w-4 h-4" />
+                  批量催办
+                </button>
+              )}
+              <span className="text-sm text-gray-500">
+                共 <span className="font-medium text-gray-900">{drillRectifications.length}</span> 条记录
+              </span>
+            </div>
           </div>
           {drillRectifications.length === 0 ? (
             <div className="py-16 text-center">
@@ -575,15 +805,29 @@ export default function AuditReportPage() {
             </div>
           ) : (
             <div className="divide-y divide-gray-100">
-              {drillRectifications.map((todo) => (
+              {drillRectifications.map((todo) => {
+                const isSelected = selectedRectIds.includes(todo.id);
+                const lastRemind = getLastReminderTime(todo.id);
+                return (
                 <div
                   key={todo.id}
                   className={cn(
                     'p-5 hover:bg-gray-50 transition-colors',
-                    todo.isOverdue && 'bg-red-50/30'
+                    todo.isOverdue && 'bg-red-50/30',
+                    isSelected && 'bg-blue-50/50'
                   )}
                 >
-                  <div className="flex items-start justify-between">
+                  <div className="flex items-start gap-4">
+                    <button
+                      onClick={() => handleToggleSelect(todo.id)}
+                      className="mt-1 flex-shrink-0"
+                    >
+                      {isSelected ? (
+                        <CheckSquare className="w-5 h-5 text-blue-600" />
+                      ) : (
+                        <Square className="w-5 h-5 text-gray-400 hover:text-gray-600" />
+                      )}
+                    </button>
                     <div className="flex-1">
                       <div className="flex items-center gap-3 flex-wrap">
                         <h3 className="font-medium text-gray-900">{todo.folderName}</h3>
@@ -608,6 +852,12 @@ export default function AuditReportPage() {
                             查看凭证
                           </button>
                         )}
+                        {todo.reminderCount && todo.reminderCount > 0 && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-orange-50 text-orange-600 text-xs font-medium rounded">
+                            <Bell className="w-3 h-3" />
+                            已催办 {todo.reminderCount} 次
+                          </span>
+                        )}
                       </div>
                       <p className="mt-2 text-sm text-gray-600">{todo.opinion}</p>
                       {todo.result && (
@@ -627,6 +877,9 @@ export default function AuditReportPage() {
                         <span>涉及 {todo.memberIds.length} 名成员：{todo.memberNames.join('、')}</span>
                         <span>发起：{todo.createdAt}</span>
                         {todo.completedAt && <span>完成：{todo.completedAt}</span>}
+                        {lastRemind && (
+                          <span className="text-orange-500">最近催办：{lastRemind}</span>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2 ml-4 flex-shrink-0">
@@ -666,7 +919,8 @@ export default function AuditReportPage() {
                     </div>
                   </div>
                 </div>
-              ))}
+              );
+              })}
             </div>
           )}
         </div>
@@ -701,6 +955,55 @@ export default function AuditReportPage() {
         {previewScreenshot && (
           <div className="flex items-center justify-center bg-gray-50 rounded-lg p-4">
             <img src={previewScreenshot.data} alt={previewScreenshot.name} className="max-h-[60vh] max-w-full rounded-md shadow-md" />
+          </div>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={showRemindModal}
+        onClose={() => !remindSuccess && setShowRemindModal(false)}
+        title="批量催办"
+        size="md"
+      >
+        {remindSuccess ? (
+          <div className="text-center py-8">
+            <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <CheckCircle2 className="w-8 h-8 text-green-600" />
+            </div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-1">催办成功</h3>
+            <p className="text-sm text-gray-500">已向 {selectedRectIds.length} 项任务发送催办通知</p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <p className="text-sm text-gray-600">
+              您已选择 <span className="font-semibold text-blue-600">{selectedRectIds.length}</span> 项整改任务，
+              确认要批量催办吗？
+            </p>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">催办留言（可选）</label>
+              <textarea
+                value={remindMessage}
+                onChange={(e) => setRemindMessage(e.target.value)}
+                placeholder="请输入催办留言..."
+                rows={3}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
+              />
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                onClick={() => setShowRemindModal(false)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleConfirmRemind}
+                className="px-4 py-2 text-sm font-medium text-white bg-orange-500 rounded-lg hover:bg-orange-600 transition-colors flex items-center gap-2"
+              >
+                <Megaphone className="w-4 h-4" />
+                确认催办
+              </button>
+            </div>
           </div>
         )}
       </Modal>

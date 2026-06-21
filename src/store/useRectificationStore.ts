@@ -1,10 +1,12 @@
 import { create } from 'zustand';
-import type { Rectification, RectificationStatus, DepartmentStat, ProjectStat, FolderStat } from '@/types';
+import type { Rectification, RectificationStatus, DepartmentStat, ProjectStat, FolderStat, TrendDataPoint, ReminderRecord } from '@/types';
 import { rectifications as initialRectifications } from '@/data/rectifications';
 import {
   loadRectifications,
   saveRectifications,
   saveScreenshot as saveScreenshotUtil,
+  loadReminders,
+  saveReminders,
 } from '@/utils/storage';
 import { folders } from '@/data/folders';
 
@@ -105,6 +107,16 @@ interface ScopeFilter {
   department?: string;
   project?: string;
   folderId?: string;
+  riskType?: string;
+  status?: RectificationStatus | 'all';
+}
+
+function getRiskTypeByActionType(actionType: string): string {
+  if (actionType === 'revoke_external') return 'external_access';
+  if (actionType === 'revoke_resigned') return 'resigned_access';
+  if (actionType === 'reduce_editors') return 'too_many_editors';
+  if (actionType === 'review_inactive') return 'long_unaccessed';
+  return '';
 }
 
 function filterByScope(rects: Rectification[], filter: ScopeFilter): Rectification[] {
@@ -124,12 +136,19 @@ function filterByScope(rects: Rectification[], filter: ScopeFilter): Rectificati
   if (filter.folderId) {
     result = result.filter((r) => r.folderId === filter.folderId);
   }
+  if (filter.riskType) {
+    result = result.filter((r) => getRiskTypeByActionType(r.actionType) === filter.riskType);
+  }
+  if (filter.status && filter.status !== 'all') {
+    result = result.filter((r) => r.status === filter.status);
+  }
 
   return result;
 }
 
 interface RectificationState {
   rectifications: Rectification[];
+  reminders: ReminderRecord[];
   statusFilter: RectificationStatus | 'all';
   ownerFilter: string;
   departmentFilter: string;
@@ -170,9 +189,15 @@ interface RectificationState {
     department?: string,
     project?: string,
     folderId?: string,
-    period?: string
+    period?: string,
+    riskType?: string,
+    status?: RectificationStatus | 'all'
   ) => Rectification[];
   getFilteredByScope: (filter: ScopeFilter) => Rectification[];
+  computeTrendData: (months: number, filter?: ScopeFilter) => TrendDataPoint[];
+  batchRemind: (rectIds: string[], message?: string) => ReminderRecord[];
+  getRemindersByRectId: (rectId: string) => ReminderRecord[];
+  getLastReminderTime: (rectId: string) => string | undefined;
 }
 
 function isRectDataValid(rects: Rectification[]): boolean {
@@ -187,6 +212,7 @@ function isRectDataValid(rects: Rectification[]): boolean {
 
 export const useRectificationStore = create<RectificationState>((set, get) => ({
   rectifications: initialRectifications,
+  reminders: [],
   statusFilter: 'all',
   ownerFilter: '',
   departmentFilter: '',
@@ -200,6 +226,8 @@ export const useRectificationStore = create<RectificationState>((set, get) => ({
         const data = initialRectifications.map((r) => ({
           ...r,
           dueDate: r.dueDate || computeDueDate(r.createdAt),
+          lastReminderAt: r.lastReminderAt,
+          reminderCount: r.reminderCount || 0,
         }));
         const withOverdue = data.map((r) => ({ ...r, isOverdue: isOverdue(r) }));
         set({ rectifications: withOverdue, initialized: true });
@@ -210,6 +238,7 @@ export const useRectificationStore = create<RectificationState>((set, get) => ({
       return;
     }
     const stored = loadRectifications();
+    const storedReminders = loadReminders();
     let data: Rectification[] = [];
     if (isRectDataValid(stored)) {
       data = stored;
@@ -217,11 +246,12 @@ export const useRectificationStore = create<RectificationState>((set, get) => ({
       data = initialRectifications.map((r) => ({
         ...r,
         dueDate: r.dueDate || computeDueDate(r.createdAt),
+        reminderCount: 0,
       }));
       saveRectifications(data);
     }
     const withOverdue = data.map((r) => ({ ...r, isOverdue: isOverdue(r) }));
-    set({ rectifications: withOverdue, initialized: true });
+    set({ rectifications: withOverdue, reminders: storedReminders, initialized: true });
     saveRectifications(withOverdue);
   },
 
@@ -466,8 +496,8 @@ export const useRectificationStore = create<RectificationState>((set, get) => ({
     return { total, resolved, pending, processing, overdue, rate };
   },
 
-  getRectificationsForDrill: (level, department, project, folderId, period) => {
-    const filter: ScopeFilter = { period };
+  getRectificationsForDrill: (level, department, project, folderId, period, riskType, status) => {
+    const filter: ScopeFilter = { period, riskType, status };
     if (level === 'department' && department) {
       filter.department = department;
     }
@@ -479,5 +509,107 @@ export const useRectificationStore = create<RectificationState>((set, get) => ({
       filter.folderId = folderId;
     }
     return filterByScope(get().rectifications, filter);
+  },
+
+  computeTrendData: (months, filter = {}) => {
+    const allRects = get().rectifications;
+    const result: TrendDataPoint[] = [];
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth();
+
+    for (let i = months - 1; i >= 0; i--) {
+      const d = new Date(currentYear, currentMonth - i, 1);
+      const year = d.getFullYear();
+      const month = d.getMonth();
+      const monthKey = `${year}年${month + 1}月`;
+      const monthLabel = `${month + 1}月`;
+
+      const monthStart = new Date(year, month, 1);
+      const monthEnd = new Date(year, month + 1, 0, 23, 59, 59, 999);
+
+      const monthRects = allRects.filter((r) => {
+        const created = parseCreatedAt(r.createdAt);
+        if (!created) return false;
+        return created >= monthStart && created <= monthEnd;
+      });
+
+      const filteredMonthRects = filterByScope(monthRects, filter);
+
+      const newCount = filteredMonthRects.length;
+
+      const completedCount = filteredMonthRects.filter((r) => {
+        if (r.status !== 'completed' || !r.completedAt) return false;
+        const completed = parseCreatedAt(r.completedAt);
+        if (!completed) return false;
+        return completed >= monthStart && completed <= monthEnd;
+      }).length;
+
+      const pendingCount = filteredMonthRects.filter(
+        (r) => r.status === 'pending' || r.status === 'processing'
+      ).length;
+
+      const overdueCount = filteredMonthRects.filter((r) => r.isOverdue).length;
+
+      result.push({
+        month: monthKey,
+        monthLabel,
+        newCount,
+        completedCount,
+        pendingCount,
+        overdueCount,
+      });
+    }
+
+    return result;
+  },
+
+  batchRemind: (rectIds, message) => {
+    const now = new Date();
+    const remindedAt = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+
+    const newReminders: ReminderRecord[] = rectIds.map((id, idx) => {
+      const rect = get().rectifications.find((r) => r.id === id);
+      return {
+        id: `reminder-${Date.now()}-${idx}`,
+        rectificationId: id,
+        folderName: rect?.folderName || '',
+        remindedBy: 'auditor1',
+        remindedByName: '审计员张三',
+        remindedAt,
+        message,
+      };
+    });
+
+    const updatedRects = get().rectifications.map((r) => {
+      if (rectIds.includes(r.id)) {
+        return {
+          ...r,
+          lastReminderAt: remindedAt,
+          reminderCount: (r.reminderCount || 0) + 1,
+        };
+      }
+      return r;
+    });
+
+    const allReminders = [...get().reminders, ...newReminders];
+
+    set({ rectifications: updatedRects, reminders: allReminders });
+    saveRectifications(updatedRects);
+    saveReminders(allReminders);
+
+    return newReminders;
+  },
+
+  getRemindersByRectId: (rectId) => {
+    return get().reminders.filter((r) => r.rectificationId === rectId).sort((a, b) =>
+      b.remindedAt.localeCompare(a.remindedAt)
+    );
+  },
+
+  getLastReminderTime: (rectId) => {
+    const reminders = get().reminders.filter((r) => r.rectificationId === rectId);
+    if (reminders.length === 0) return undefined;
+    return reminders.sort((a, b) => b.remindedAt.localeCompare(a.remindedAt))[0].remindedAt;
   },
 }));
